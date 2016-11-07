@@ -1,0 +1,198 @@
+#!/usr/bin/env python
+
+try:
+	import fdb
+except ImportError, _:
+	pass
+
+import sys, getopt, socket
+from operator import itemgetter
+from itertools import groupby
+
+RETURN_CODE = {'OK': 0, 'WARNING': 1, 'CRITICAL': 2}
+
+def usage():
+    """
+    Show Usage
+
+    Returns the nagios status UNKOWN with a usage description
+    """
+    _return('CRITICAL',
+	'''usage: {0} -h <host> -a <alias> -u <username> -p <password> -t <type> -d <optional destport default:3050> -w <warning> -c <critical>
+	Available <type> of queries: version, connections, transactions, attachments, pids'''.format(sys.argv[0]))
+
+
+def _return(code, response):
+    """
+    Prints the response message and exits the script with one of the defined
+    exit codes.
+    """
+    print response
+    sys.exit(RETURN_CODE[code])
+ 
+
+def _execute(host, destport, alias, username, password, type, warning, critical):
+    """
+    Tries to connect to the given firebird database and execute a SQL statement
+    which should return a list of available tables. Be aware this doesn't
+    work if your database has no tables.
+
+    @param host    : hostname/ip
+    @param alias   : database alias
+    @param username: username
+    @param password: password
+    """
+    try :
+        dsnstring  = host + "/" + destport + ":" + alias
+        connection = fdb.connect(dsn=dsnstring,
+                                 user=username,
+                                 password=password)
+
+        connection.begin()
+        # Execute an sql on the connection
+	cur = connection.cursor()
+	if type == 'version':
+		version = connection.server_version
+		cur.execute('SELECT DISTINCT RDB$RELATION_NAME FROM RDB$RELATION_FIELDS WHERE RDB$SYSTEM_FLAG=0;')
+		output = 'Version: ' + version
+	elif type == 'connections':
+		cur.execute('select current_connection from rdb$database;')
+		output = 'Connections: '
+		for row in cur:
+			output += str(row[0])
+	elif type == 'transactions':
+		cur.execute('select current_transaction from rdb$database;')
+		output = 'Transactions: '
+		for row in cur:
+			output += str(row[0])
+	elif type == 'attachments':
+		cur.execute('select count(mon$attachment_id) from mon$attachments;')
+		output = 'Attachments: '
+		for row in cur:
+			output += str(row[0])
+	elif type == 'pids':
+		cur.execute('Select mon$server_pid, mon$remote_process from mon$attachments;')
+		output = 'Number of processes per app: '
+		temp = ''
+		for row in cur:
+			temp += str(row[1])
+			temp += ': '
+			temp += str(row[0])
+			temp += '\n'
+		total = ''
+		pairs = sorted(line.split() for line in temp.split('\n') if line.strip())
+		for first, grouper in groupby(pairs, itemgetter(0)):
+			line = first + ' ' + ', '.join(second for first, second in grouper)
+    			output += line
+			output += '\t'
+			pids_num = len(line.split(': ')[1].split(','))
+			total += str(pids_num) + ','
+		pids_list = total.split(',')[:-1]
+		pids_list = map(int, pids_list)
+		if max(pids_list) > warning and max(pids_list) <= critical:
+			return {'code': 'WARNING', 'message': output}
+		elif max(pids_list) > critical:
+			return {'code': 'CRITICAL', 'message': output}
+	else:
+		connection.close()
+		return {'code': 'CRITICAL', 'message': 'ERROR - Incorrect type of query'}
+
+        connection.close()
+
+    except fdb.OperationalError, msg:
+        return {'code': 'CRITICAL',
+                'message': dsnstring + ' ' + msg[1].rstrip('\n')}
+
+    return {'code': 'OK', 'message': output}
+
+def is_valid_ipv4_address(address):
+    """
+    Returns true if IP address is in a valid ipv4 format
+    """
+    try:
+        addr = socket.inet_pton(socket.AF_INET, address)
+    except AttributeError: # no inet_pton here, sorry
+        try:
+            addr = socket.inet_aton(address)
+        except socket.error:
+            return False
+        return address.count('.') == 3
+    except socket.error: # not a valid address
+        return False
+ 
+    return True
+ 
+def is_valid_ipv6_address(address):
+    """
+    Returns true if IP address is in a valid ipv6 format
+    """
+    try:
+        addr = socket.inet_pton(socket.AF_INET6, address)
+    except socket.error: # not a valid address
+        return False
+    return True
+ 
+ 
+def main():
+    """
+    Check if argument length is not less than 5 which means that 
+    "-h <host> -a <alias>" must be given as a parameter otherwise
+    the script will print the usage description using _return()
+    function, else parse/verify the parameters
+    """
+    if len(sys.argv) < 14:
+        usage()
+ 
+    try:
+        opts , args = getopt.getopt(sys.argv[1:],
+                                    'h:a:u:p:t:d:w:c:',
+                                    ['host=',
+                                     'pass=',
+                                     'alias=',
+                                     'user=',
+                                     'password=',
+				     'type=',
+                                     'destport=',
+				     'warning=',
+				     'critical='])
+    except getopt.GetoptError:
+        usage()
+ 
+    # If destport is not given an argument assume 
+    # default Firebird Port 3050
+    if not ('-d', '--destport') in opts:
+        destport = '3050'
+    if not ('-t', '--type') in opts:
+        type = 'version'
+ 
+    # Run through the opts and get the parameters
+    for o, value in opts:
+        if o in ('-h', '--host'):
+            if not is_valid_ipv4_address(value): 
+                _return('CRITICAL',
+                              'ERROR - ' + value + ' is not a valid ipv4 address.'.format(sys.argv[0]))
+            else :
+                host = value
+        elif o in ('-a', '--alias'):
+            dbalias = value
+        elif o in ('-u', '--user'):
+            username = value
+        elif o in ('-p', '--pass'):
+            password = value
+	elif o in ('-t', '--type'):
+	    type = value
+        elif o in ('-d', '--destport'):
+            destport = value
+	elif o in ('-w', '--warning'):
+	    warning = int(value)
+	elif o in ('-c', '--critical'):
+	    critical = int(value)
+        else:
+            usage()
+
+
+    result = _execute(host, destport, dbalias, username, password, type, warning, critical)
+    _return(result['code'], result['message'])
+ 
+if __name__ == '__main__':
+    main()
