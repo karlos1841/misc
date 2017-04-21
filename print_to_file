@@ -5,6 +5,8 @@ import getopt
 import subprocess
 import os.path
 import time
+import logging
+from logging.handlers import RotatingFileHandler
 
 def print_help(DEFAULT_VALS):
 	print('''Execute command and store its output to a file.
@@ -116,12 +118,7 @@ def printing(DIRNAME):
 			if opt == '-H':
 				HOSTNAME = arg
 			elif opt == '-s':
-				if os.path.isfile(arg):
-					with open(arg, "r") as tmpfile:
-						COMMAND = tmpfile.read()
-					COMMAND = COMMAND.replace('$HOSTNAME$', HOSTNAME, 1) # Replacing $HOSTNAME$ with an actual hostname
-				else:
-					COMMAND = arg
+				PATH = arg
 			elif opt == '-d':
 				DIRNAME = arg
 			elif opt == '-n':
@@ -131,7 +128,25 @@ def printing(DIRNAME):
 				print("Type " + sys.argv[0] + " --help to print help")
 				sys.exit(2)
 
+		if os.path.isfile(PATH):
+			with open(PATH, "r") as tmpfile:
+				COMMAND = tmpfile.read()
+			COMMAND = COMMAND.replace('$HOSTNAME$', HOSTNAME, 1) # Replacing $HOSTNAME$ with an actual hostname
+		else:
+			COMMAND = PATH
+
 		RETURN_STATUS = write_output(HOSTNAME, COMMAND, DIRNAME, FILENAME)
+		if RETURN_STATUS[0] != 0:
+			LOG_PATH = "/opt/monitor/var/print_to_file.log"
+			LOG_SIZE = 100*1024*1024
+			CURRENT_DATE_TIME = time.strftime("%d-%m-%Y %H:%M:%S")
+			FILE_HANDLER = RotatingFileHandler(LOG_PATH, mode='a', maxBytes=LOG_SIZE, backupCount=2, encoding=None, delay=0)
+			FILE_HANDLER.setLevel(logging.INFO)
+			LOG = logging.getLogger('root')
+			LOG.setLevel(logging.INFO)
+			LOG.addHandler(FILE_HANDLER)
+			LOG.info(CURRENT_DATE_TIME + ";" + HOSTNAME + ";" + FILENAME + ";" + str(RETURN_STATUS[0]) + ";" + RETURN_STATUS[1])
+
 		sys.stdout.write(RETURN_STATUS[1])
 		sys.exit(RETURN_STATUS[0])
 	except NameError:
@@ -175,7 +190,7 @@ def reading(DIRNAME, FRESHNESS):
 if __name__ == '__main__':
 	# DEFAULT VALUES
 	DIRNAME = '/opt/monitor/var/output'
-	FRESHNESS = 5
+	FRESHNESS = 7
 	DEFAULT_VALS = [DIRNAME, FRESHNESS]
 
 	if len(sys.argv) == 1 or sys.argv[1] == '-h' or sys.argv[1] == '--help':
