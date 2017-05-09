@@ -1,12 +1,23 @@
 Param(
-	[string]$counter="\MSExchangeTransport Queues(_total)\Items Completed Delivery TOTAL",
-	[int]$sample=10,	#number of samples, default: 10
-	[double]$step=1,	#seconds, default: one sample per 1 second
-	[int[]]$WARN=0,		#for multiple counters add the same amount of thresholds comma separated
-	[int[]]$ERR=0,		#for multiple counters add the same amount of thresholds comma separated
-	[string]$type="avg"	#default is to calculate average, available options: avg, min, max
+	#[string]$counter="\MSExchangeTransport Queues(_total)\Items Completed Delivery TOTAL",
+	[string]$counter="",
+	[int]$sample=10,
+	[double]$step=1,
+	[int[]]$WARN=0,
+	[int[]]$ERR=0,
+	[string]$type="avg"
 )
-
+if(!$counter -or $counter -eq "--help" -or ($type -ne "avg" -and $type -ne "min" -and $type -ne "max"))
+{
+	Write-Host "check_exchange_perf <counter> [sample] [step] [WARN] [ERR] [type]
+	counter - name of the counter
+	sample - number of samples, default: 10
+	step - seconds, default: one sample per 1 second
+	WARN - warning threshold, default: 0, for multiple counters add the same amount of thresholds comma separated
+	ERR - critical threshold, default: 0, for multiple counters add the same amount of thresholds comma separated
+	type - default is to calculate average, available options: avg, min, max"
+	exit 0
+}
 if((Get-PSSnapin -Name Microsoft.Exchange.Management.PowerShell.E2010 -ErrorAction:SilentlyContinue) -eq $null)
 {
 	Add-PSSnapin Microsoft.Exchange.Management.PowerShell.E2010 2> $null
