@@ -57,6 +57,7 @@ while($inc -lt $ERR.count)
 foreach($a in $customCounter)
 {
 	$d = {(Get-Counter $a.path).countersamples.cookedvalue}
+	if(!(& $d)){continue}
 	$counterName = $a.instancename
 	$warning = $a.warning
 	$critical = $a.critical
