@@ -3,8 +3,8 @@ Param(
 	[string]$counter="",
 	[int]$sample=10,
 	[double]$step=1,
-	[int[]]$WARN=0,
-	[int[]]$ERR=0,
+	[int[]]$WARN=@(0),
+	[int[]]$ERR=@(0),
 	[string]$type="avg"
 )
 if(!$counter -or $counter -eq "--help" -or ($type -ne "avg" -and $type -ne "min" -and $type -ne "max"))
@@ -39,8 +39,8 @@ $perfdata = ""
 $value = ""
 $statusCode=New-Object System.Collections.ArrayList
 $customCounter = (& $c)
-$customCounter | Add-Member -Name 'warning' -Type NoteProperty -Value 0
-$customCounter | Add-Member -Name 'critical' -Type NoteProperty -Value 0
+$customCounter | Add-Member -Name 'warning' -Type NoteProperty -Value $WARN[0]
+$customCounter | Add-Member -Name 'critical' -Type NoteProperty -Value $ERR[0]
 $inc = 0
 while($inc -lt $WARN.count)
 {
