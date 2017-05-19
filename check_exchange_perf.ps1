@@ -26,7 +26,7 @@ if((Get-PSSnapin -Name Microsoft.Exchange.Management.PowerShell.E2010 -ErrorActi
 try
 {
 	$c = {(Get-Counter $counter -ErrorAction Stop).countersamples}
-	if($sample -eq -99){(& $c);exit 0} #debug
+	if($sample -eq -99){((& $c)).Path;exit 0} #debug
 	(& $c) | Out-Null
 }
 catch
@@ -58,7 +58,7 @@ foreach($a in $customCounter)
 {
 	$d = {(Get-Counter $a.path).countersamples.cookedvalue}
 	if(!(& $d)){continue}
-	$counterName = $a.instancename
+	$counterName = $a.instancename -replace ' ', '_'
 	$warning = $a.warning
 	$critical = $a.critical
 
