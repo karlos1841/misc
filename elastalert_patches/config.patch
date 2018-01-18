@@ -1,0 +1,9 @@
++++ config.py	2018-01-10 15:16:03.406284267 +0100
+@@ -49,6 +49,7 @@
+     'blacklist': ruletypes.BlacklistRule,
+     'whitelist': ruletypes.WhitelistRule,
+     'change': ruletypes.ChangeRule,
++    'consecutive_growth': ruletypes.ConsecutiveGrowthRule,
+     'flatline': ruletypes.FlatlineRule,
+     'new_term': ruletypes.NewTermsRule,
+     'cardinality': ruletypes.CardinalityRule,
