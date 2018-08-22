@@ -1,7 +1,7 @@
 /*
  *
  * gcc -Wall ccpe_read.c -o ccpe_read -lssl -lcrypto -lm
- *
+ * Author: karol.wozniak@it.emca.pl
  *
  */
 #include <stdio.h>
@@ -351,7 +351,8 @@ char *readResponse(const char *request, const struct connectionDetails *con, con
 	//printf("%s\n", inet_ntoa(server_info.sin_addr));
 	if(connect(socket_descriptor, (struct sockaddr *)&server_info, sizeof(server_info)) == -1)
 	{
-		const char *msg = "[Error] could not create connection";
+		char msg[1024];
+		snprintf(msg, sizeof(msg), "[Error] could not create connection to %s:%u", inet_ntoa(server_info.sin_addr), con->port);
 		writeToLog(logfile, msg);
 		return error_code;
 	}
@@ -430,7 +431,8 @@ char *readSSLResponse(const char *request, const struct connectionDetails *con, 
 	}
 	if(connect(socket_descriptor, (struct sockaddr *)&server_info, sizeof(server_info)) == -1)
 	{
-		const char *msg = "[Error] could not create connection";
+		char msg[1024];
+		snprintf(msg, sizeof(msg), "[Error] could not create connection to %s:%u", inet_ntoa(server_info.sin_addr), con->port);
 		writeToLog(logfile, msg);
 		return error_code;
 	}
@@ -547,7 +549,8 @@ int sendResponse(const char *response, const struct connectionDetails *con, cons
         }
         if(connect(socket_descriptor, (struct sockaddr *)&server_info, sizeof(server_info)) == -1)
         {
-		const char *msg = "[Error] could not create connection";
+		char msg[1024];
+		snprintf(msg, sizeof(msg), "[Error] could not create connection to %s:%u", inet_ntoa(server_info.sin_addr), con->port);
 		writeToLog(logfile, msg);
                 return error_code;
         }
@@ -635,7 +638,7 @@ const char *pretty_xml(char **raw_xml)
 }
 
 // Reusing the same token
-int sendZabbixResponse(struct connectionDetails *zabbix, struct connectionDetails *logstash, const char *logfile)
+int sendZabbixResponse(struct connectionDetails *zabbix, struct connectionDetails *logstash, const char *logfile, const char *filename)
 {
 	const int error_code = -1;
 	static char auth_token[100] = "";
@@ -647,6 +650,40 @@ int sendZabbixResponse(struct connectionDetails *zabbix, struct connectionDetail
 	char *ptr;
 	char *token_ptr;
 	char zabbix_request[2048];
+
+	/*** Get item id from file ***/
+	FILE *configFile = fopen(filename, "r");
+	if(configFile == NULL)
+        {
+		const char *msg = "[Error] cannot open config file";
+		writeToLog(logfile, msg);
+		return -1;
+        }
+
+	const char *item_id_str = "item_id=";
+	const char *item_id = NULL;
+	char line[100];
+	while(fgets(line, sizeof(line), configFile) != NULL)
+	{
+		if((item_id = strstr(line, item_id_str)) != NULL)
+		{
+			int i = strlen(item_id_str);
+			item_id += i;
+			// remove newline char
+			while(line[i] != '\0')
+			{
+				if(line[i] == '\n')
+				{
+					line[i] = '\0';
+					break;
+				}
+				++i;
+			}
+		}
+	}
+
+	fclose(configFile);
+	/*** available in item_id ***/
 
 	if(!strcmp(auth_token, ""))
 	{
@@ -702,18 +739,20 @@ int sendZabbixResponse(struct connectionDetails *zabbix, struct connectionDetail
 	snprintf(search_data, sizeof(search_data)-1,
 		"{"
 		"\"jsonrpc\": \"2.0\","
-		"\"method\": \"item.get\","
+		"\"method\": \"history.get\","
 		"\"params\": {"
-		"\"host\": \"TSSP\","
-		"\"search\": {"
-		"\"name\": \"Health Check status\""
-		"},"
-		"\"sortfield\": \"itemid\","
-		"\"output\": [\"status\"]"
+		"\"itemids\": \"%s\","
+		"\"output\": \"extend\","
+		"\"history\": \"0\","
+		"\"sortfield\": \"clock\","
+		"\"sortorder\": \"DESC\","
+		"\"limit\": \"1\""
 		"},"
 		"\"auth\": %s,"
 		"\"id\": 1"
-		"}", auth_token);
+		"}", item_id, auth_token);
+
+	writeToLog(logfile, search_data);
 
 	// prepare request with headers
 	snprintf(zabbix_request, sizeof(zabbix_request)-1,
@@ -727,14 +766,15 @@ int sendZabbixResponse(struct connectionDetails *zabbix, struct connectionDetail
 	if((response = readSSLResponse(zabbix_request, zabbix, logfile)) == NULL)
                 return error_code;
 
+	writeToLog(logfile, response);
+
 	parsed_response = remove_headers(&response);
 	//printf("%s\n", zabbix_request);
 	//printf("%s\n", parsed_response);
-	writeToLog(logfile, zabbix_request);
 
-	// Response parsing - extracting value for status field
+	// Response parsing - extracting value from field named "value"
 	char result[1024];
-	match = "\"status\":";
+	match = "\"value\":";
 	if((ptr = strstr(parsed_response, match)) == NULL)
 		return error_code;
 	
@@ -745,14 +785,35 @@ int sendZabbixResponse(struct connectionDetails *zabbix, struct connectionDetail
 	if((token_ptr = strtok(result, "}")) == NULL)
                 return error_code;
 
-	strncpy(result, token_ptr, sizeof(result) - 1);
-	snprintf(result, sizeof(result) - 1, "{\"status\": %d}\n", strtol(result, NULL, 0) == 0 ? 100 : 0);
+	char value[1024];
+	strncpy(value, token_ptr + 1, sizeof(value) - 1);
+
+	// Response parsing - extracting value from field named "clock" and converting to ISO8601 UTC
+	match = "\"clock\":";
+	if((ptr = strstr(parsed_response, match)) == NULL)
+		return error_code;
+	ptr += strlen(match);
+	strncpy(result, ptr, sizeof(result) - 1);
+	//printf("%s\n", result);
+
+	if((token_ptr = strtok(result, "}")) == NULL)
+		return error_code;
+	strncpy(result, token_ptr + 1, sizeof(result) - 1);
+
+	struct tm *timeinfo;
+	time_t clock = strtol(result, NULL, 0);
+	char timestamp[30];
+	timeinfo = gmtime(&clock);
+	strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%SZ", timeinfo);
+
+	//printf("%s\n", value);
+	//printf("%s\n", result);
+	// LAST BYTE MUST BE NEWLINE OTHERWISE LOGSTASH HOLDS IT IN THE BUFFER
+	//printf("%s\n", result);
+	snprintf(result, sizeof(result) - 1, "{\"status\": %d, \"clock\": \"%s\"}\n", strtol(value, NULL, 0) == 0 ? 100 : 0, timestamp);
 	//printf("%s\n", result);
 	writeToLog(logfile, result);
 
-
-	// LAST BYTE MUST BE NEWLINE OTHERWISE LOGSTASH HOLDS IT IN THE BUFFER
-	//printf("%s\n", result);
 	if(sendResponse(result, logstash, logfile) != 0)
 		return error_code;
 
@@ -876,41 +937,26 @@ unsigned short getHttpStatus(const char *response)
 int sendUcmdbInChunks(struct connectionDetails *ucmdb, struct connectionDetails *logstash, const char *logfile)
 {
 	const int error_code = -1;
-	char msg[100];
+	char msg[100]; // used to store logging message
 	const char *method = "POST";
 	const char *path = "/axis2/services/UcmdbService?wsdl";
 	char ucmdb_request[2048];
-	const char *data = "<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\" "
-	"xmlns:quer=\"http://schemas.hp.com/ucmdb/1/params/query\" "
-	"xmlns:typ=\"http://schemas.hp.com/ucmdb/1/types\" "
+	const char *data =
+	"<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\" "
+	"xmlns:quer=\"http://schemas.hp.com/ucmdb/1/params/query\" xmlns:typ=\"http://schemas.hp.com/ucmdb/1/types\" "
 	"xmlns:prop=\"http://schemas.hp.com/ucmdb/1/types/props\">"
 	"<soapenv:Header/>"
 	"<soapenv:Body>"
-	"<quer:executeTopologyQueryByNameWithParameters>"
+	"<quer:executeTopologyQueryByName>"
 	"<quer:cmdbContext>"
-	"<typ:callerApplication>fiuSOAPUI test</typ:callerApplication>"
+	"<typ:callerApplication>Service Monitoring</typ:callerApplication>"
 	"</quer:cmdbContext>"
-	"<quer:queryName>CIs per CFSS</quer:queryName>"
-	"<quer:parameterizedNodes>"
-	"<typ:parameters>"
-	"<typ:strProps>"
-	"<typ:strProp>"
-	"<typ:name>pannet_service_id</typ:name>"
-	"<typ:value>BRANCH_CCPE</typ:value>"
-	"</typ:strProp>"
-	"<typ:strProp>"
-	"<typ:name>pannet_version</typ:name>"
-	"<typ:value>1.00</typ:value>"
-	"</typ:strProp>"
-	"</typ:strProps>"
-	"</typ:parameters>"
-	"<typ:nodeLabel>CFSS</typ:nodeLabel>"
-	"</quer:parameterizedNodes>"
-	"</quer:executeTopologyQueryByNameWithParameters>"
+	"<quer:queryName>pannet_service_monitoring</quer:queryName>"
+	"</quer:executeTopologyQueryByName>"
 	"</soapenv:Body>"
 	"</soapenv:Envelope>";
 
-	snprintf(ucmdb_request, sizeof(ucmdb_request)-1,
+	snprintf(ucmdb_request, sizeof(ucmdb_request),
 	"%s %s HTTP/1.0\r\n"
 	"Content-type: text/xml\r\n"
 	"Authorization: Basic %s\r\n"
@@ -925,10 +971,11 @@ int sendUcmdbInChunks(struct connectionDetails *ucmdb, struct connectionDetails 
 	timeinfo = gmtime(&rawtime);
 	strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%SZ", timeinfo);
 
-	/* FIRST RESPONSE */
-	char *ucmdb_response = NULL;
+	// FIRST RESPONSE
+	char *ucmdb_response = NULL; // points to the first response, either info about chunks or whole response
 	if((ucmdb_response = readResponse(ucmdb_request, ucmdb, logfile)) == NULL)
 		return error_code;
+	//printf("%s\n", ucmdb_response);
 	if(getHttpStatus(ucmdb_response) != 200)
 	{
 		writeToLog(logfile, ucmdb_response);
@@ -936,109 +983,128 @@ int sendUcmdbInChunks(struct connectionDetails *ucmdb, struct connectionDetails 
 		return error_code;
 	}
 
-	/* If there are no chunks, set number of chunks to 1 */
+	// If numberOfChunks returns 0 ucmdb_response points to the whole response without chunks
+	// If there are no chunks those variables are not used anyway but we use sane defaults to prevent from improperly filling key2 buffer
+	size_t key2Length = 1;
+	const char *key2ptr = "\0";
 	unsigned int noOfChunks;
-	size_t key2Length;
-	const char *key2ptr = NULL;
-	if(((noOfChunks = numberOfChunks(ucmdb_response)) == 0) || ((key2ptr = getChunksKey2(ucmdb_response, &key2Length)) == NULL))
+	if((noOfChunks = numberOfChunks(ucmdb_response)) != 0)
+		key2ptr = getChunksKey2(ucmdb_response, &key2Length);
+	else
 		noOfChunks = 1;
 
 	char key2[key2Length + 1];
-	strncpy(key2, key2ptr, key2Length);
-	//printf("%d\n", getHttpStatus(ucmdb_response));
+	memset(key2, 0, key2Length + 1);
+	memcpy(key2, key2ptr, key2Length);
 
-	/* END OF FIRST RESPONSE 
- * 	WE'VE GOT NUMBER OF CHUNKS AND KEY2 ID */
+	/* WE'VE GOT NUMBER OF CHUNKS AND KEY2 ID IF CHUNKS ARE PRESENT */
 
-	//printf("%s\n", key2);
+	//printf("%s\n", key2ptr);
+	//printf("%zi\n", key2Length);
 	//printf("%d\n", noOfChunks);
 
-	/* EVERY TIME WE SAY CHUNK IN A LOOP WE MEAN SUBCHUNK
- *	WE DIVIDE EVERY CHUNK FOR SMALLER CHUNKS DUE TO LOGSTASH ISSUE WHEN DEALING WITH HUGE ONE LINE
- *	WE STICK TIMESTAMP TO EVERY SUBCHUNK OF EVERY CHUNK TO IDENTIFY THE WHOLE RESPONSE
- * 	*/
+	/* WE DIVIDE EVERY CHUNK FOR SMALLER CHUNKS DUE TO LOGSTASH ISSUE WHEN DEALING WITH HUGE DOCUMENTS
+	WE STICK TIMESTAMP TO EVERY SUBCHUNK OF EVERY CHUNK TO IDENTIFY THE WHOLE RESPONSE
+	NEW: NOW WE INSERT ID AFTER TIMESTAMP TO IDENTIFY EACH SUBCHUNK
+	AND PROPERLY RESTORE THE ORDER OF DOCUMENTS IN ELASTICSEARCH THE WAY THEY WERE SENT FROM HERE
+	*/
 
 	char chunk_request[2048];
-	int chunk_number;
+	int chunk_number; // helper variable used in loops
 	int error_flag = 0; // after loop ends if this value is not equal to 0 it means we have not got all chunks
-	// array of pointers to all formatted chunks gathered in loop
-	char *all_chunks[noOfChunks];
-	// array of pointers to all pretty xml chunks gathered in loop
-	char *raw_chunks[noOfChunks];
+	char *all_chunks[noOfChunks]; // array of pointers to all formatted chunks gathered in loop
+	char *raw_chunks[noOfChunks]; // array of pointers to all pretty xml chunks gathered in loop
 	// initialize to NULL so when we break from loop we can safely free
 	for(chunk_number = 0; chunk_number < noOfChunks; chunk_number++)
 	{
 		all_chunks[chunk_number] = NULL;
 		raw_chunks[chunk_number] = NULL;
 	}
-	raw_chunks[0] = ucmdb_response; // if there are no chunks, one response is here
-	for(chunk_number = 1; chunk_number <= noOfChunks; chunk_number++)
+	unsigned int document_id = 1; // every next subchunk in a loop below has unique id+1
+	unsigned long noOfDocs = 0; // after loop ends this variable contains number of documents sent
+	if(noOfChunks != 1)
+		free(ucmdb_response); // avoid leaking memory we don't use in case of more chunks
+	else
+		raw_chunks[0] = ucmdb_response; // if there is only one chunk, the response is here
+	for(chunk_number = 0; chunk_number < noOfChunks; chunk_number++)
 	{
-		snprintf(chunk_request, sizeof(chunk_request)-1,
-		"<soap:Envelope xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\" "
-		"xmlns:quer=\"http://schemas.hp.com/ucmdb/1/params/query\" "
-		"xmlns:typ=\"http://schemas.hp.com/ucmdb/1/types\" "
-		"xmlns:prop=\"http://schemas.hp.com/ucmdb/1/types/props\">"
-		"<soap:Header/>"
-		"<soap:Body>"
-		"<quer:pullTopologyMapChunks>"
-		"<quer:cmdbContext>"
-		"<typ:callerApplication>KB tests</typ:callerApplication>"
-		"</quer:cmdbContext>"
-		"<typ:ChunkRequest>"
-		"<typ:chunkNumber>%d</typ:chunkNumber>"
-		"<typ:chunkInfo>"
-		"<typ:numberOfChunks>%d</typ:numberOfChunks>"
-		"<typ:chunksKey>"
-		"<typ:key1>CIs per CFSS</typ:key1>"
-		"<typ:key2>%s</typ:key2>"
-		"</typ:chunksKey>"
-		"</typ:chunkInfo>"
-		"</typ:ChunkRequest>"
-		"</quer:pullTopologyMapChunks>"
-		"</soap:Body>"
-		"</soap:Envelope>", chunk_number, noOfChunks, key2);
-
-		snprintf(ucmdb_request, sizeof(ucmdb_request)-1,
-		"%s %s HTTP/1.0\r\n"
-		"Content-type: text/xml\r\n"
-		"Authorization: Basic %s\r\n"
-		"Content-length: %zu\r\n\r\n"
-		"%s", method, path, ucmdb->base64, strlen(chunk_request), chunk_request);
-
-		/* if we have chunks let's request for them otherwise use already obtained response */
 		if(noOfChunks != 1)
 		{
-			if((raw_chunks[chunk_number - 1] = readResponse(ucmdb_request, ucmdb, logfile)) == NULL)
+			snprintf(chunk_request, sizeof(chunk_request),
+			"<soap:Envelope xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\" "
+			"xmlns:quer=\"http://schemas.hp.com/ucmdb/1/params/query\" "
+			"xmlns:typ=\"http://schemas.hp.com/ucmdb/1/types\" "
+			"xmlns:prop=\"http://schemas.hp.com/ucmdb/1/types/props\">"
+			"<soap:Header/>"
+			"<soap:Body>"
+			"<quer:pullTopologyMapChunks>"
+			"<quer:cmdbContext>"
+			"<typ:callerApplication>Service Monitoring</typ:callerApplication>"
+			"</quer:cmdbContext>"
+			"<typ:ChunkRequest>"
+			"<typ:chunkNumber>%d</typ:chunkNumber>"
+			"<typ:chunkInfo>"
+			"<typ:numberOfChunks>%d</typ:numberOfChunks>"
+			"<typ:chunksKey>"
+			"<typ:key1>pannet_service_monitoring</typ:key1>"
+			"<typ:key2>%s</typ:key2>"
+			"</typ:chunksKey>"
+			"</typ:chunkInfo>"
+			"</typ:ChunkRequest>"
+			"</quer:pullTopologyMapChunks>"
+			"</soap:Body>"
+			"</soap:Envelope>", chunk_number + 1, noOfChunks, key2);
+
+			snprintf(ucmdb_request, sizeof(ucmdb_request),
+			"%s %s HTTP/1.0\r\n"
+			"Content-type: text/xml\r\n"
+			"Authorization: Basic %s\r\n"
+			"Content-length: %zu\r\n\r\n"
+			"%s", method, path, ucmdb->base64, strlen(chunk_request), chunk_request);
+
+			//printf("%s\n", ucmdb_request);
+
+			if((raw_chunks[chunk_number] = readResponse(ucmdb_request, ucmdb, logfile)) == NULL)
 			{
 				error_flag = error_code;
 				break;
 			}
-			if(getHttpStatus(raw_chunks[chunk_number - 1]) != 200)
+			if(getHttpStatus(raw_chunks[chunk_number]) != 200)
 			{
-				writeToLog(logfile, raw_chunks[chunk_number - 1]);
+				writeToLog(logfile, raw_chunks[chunk_number]);
 				error_flag = error_code;
 				break;
 			}
 		}
-		// prepare response - remove webserver headers
-		remove_headers(&raw_chunks[chunk_number - 1]);
-		// insert newlines to xml
-		pretty_xml(&raw_chunks[chunk_number - 1]);
-		insertStrAtTheEndOfStr(&raw_chunks[chunk_number - 1], "\n");
+
+		remove_headers(&raw_chunks[chunk_number]); // prepare response - remove webserver headers
+		pretty_xml(&raw_chunks[chunk_number]); // insert newlines to xml
+		insertStrAtTheEndOfStr(&raw_chunks[chunk_number], "\n");
+		//print raw chunks for debugging purposes
+		//printf("\nChunk no %d: \n%s", chunk_number, raw_chunks[chunk_number - 1]);
+		//printf("\nChunk no %d\n", chunk_number);
 
 		// array of pointers to dynamically allocated memory containing chunks
 		const unsigned long max_lines_in_chunk = 5000;
-		const unsigned long numberOfChunks = getNoOfChunks(raw_chunks[chunk_number - 1], max_lines_in_chunk);
+		const unsigned long numberOfChunks = getNoOfChunks(raw_chunks[chunk_number], max_lines_in_chunk);
+		// extract number of documents
+		noOfDocs += numberOfChunks;
 		char *ptrToChunks[numberOfChunks];
 		// create separate chunks, every chunk consists of max max_lines_in_chunk
-		createChunks(raw_chunks[chunk_number - 1], ptrToChunks, numberOfChunks, max_lines_in_chunk);
+		createChunks(raw_chunks[chunk_number], ptrToChunks, numberOfChunks, max_lines_in_chunk);
 
 		unsigned long i;
 		for(i = 0; i < numberOfChunks; i++)
 		{
+			// insert document_id at the beginning of every chunk
+			char int_to_str[12];
+			snprintf(int_to_str, sizeof(int_to_str), "%011u", document_id);
+			++document_id;
+			insertStrAtTheBegOfStr(&ptrToChunks[i], int_to_str);
+
 			// insert timestamp at the beginning of every chunk
 			insertStrAtTheBegOfStr(&ptrToChunks[i], timestamp);
+
 			//remove newlines, carriage returns(that's what we get in response)
 			//and insert one in the end so that every chunk is a separate event in elastic
 			replaceCharInStr(ptrToChunks[i], '\n', ' ');
@@ -1055,13 +1121,11 @@ int sendUcmdbInChunks(struct connectionDetails *ucmdb, struct connectionDetails 
 			free(sum_response);
 			sum_response = tmp_ptr;
 		}
-		/*
-		*/
 
 		// free subchunks - all appended subchunks are in sum_response
 		destroyChunks(ptrToChunks, numberOfChunks);
 		// all chunks will be available after loop ends in all_chunks array
-		all_chunks[chunk_number - 1] = sum_response;
+		all_chunks[chunk_number] = sum_response;
 	}
 	/* END OF LOOP */
 	if(error_flag != 0)
@@ -1074,43 +1138,155 @@ int sendUcmdbInChunks(struct connectionDetails *ucmdb, struct connectionDetails 
 		return error_code;
 	}
 
+	/*** elasticsearch connection details ***/
+	struct connectionDetails elasticsearch;
+	strncpy(elasticsearch.host, "100.127.111.14", sizeof(elasticsearch.host));
+	elasticsearch.port = 9200;
+
+	/*
+	// EXPECTED OK RESPONSE FROM ELASTICSEARCH
+	const char *expected_response = "{\"acknowledged\":true}";
+
+	// DELETE INDEX ALIAS
+	const char *alias_data = "{\"actions\" : [{\"remove\" : {\"index\" : \"ucmdb\",\"alias\" : \"vucmdb\"}}]}";
+	char alias_request[1024];
+
+	snprintf(alias_request, sizeof(alias_request),
+	"POST /_aliases HTTP/1.0\r\n"
+	"Content-type: application/json\r\n"
+	"Content-length: %zu\r\n\r\n"
+	"%s", strlen(alias_data), alias_data);
+	char *alias_response = NULL;
+	do {
+		free(alias_response);
+		if((alias_response = readResponse(alias_request, &elasticsearch, logfile)) == NULL)
+			return error_code;
+	} while(strstr(alias_response, expected_response) == NULL);
+
+	//printf("%s\n", alias_response);
+	free(alias_response);
+	*/
+
+	const char *expected_response;
+	expected_response = "index_not_found_exception"; // index is deleted if we get this message
+
+	/*** DELETE OLD UCMDB INDEX ***/
+	writeToLog(logfile, "Deleting old ucmdb index...");
+	const char *delete_request = "DELETE /ucmdb HTTP/1.0\r\n"
+					"Authorization: Basic bG9nc2VydmVyOmxvZ3NlcnZlcg==\r\n" //logserver:logserver
+					"Content-length: 0\r\n\r\n";
+	char *delete_response = NULL;
+	do {
+		free(delete_response);
+		if((delete_response = readResponse(delete_request, &elasticsearch, logfile)) == NULL)
+			return error_code;
+	} while(strstr(delete_response, expected_response) == NULL);
+	//printf("%s\n", delete_response);
+	free(delete_response);
+	writeToLog(logfile, "Index deleted");
+
+	/*** SEND NEW DATA TO LOGSTASH 
+	 * NO IDEA WHEN ALL DATA WILL BE AVAILABLE IN ELASTICSEARCH
+	***/
+	snprintf(msg, sizeof(msg), "Sending chunks from %s:%d to %s:%d...", ucmdb->host, ucmdb->port, logstash->host, logstash->port);
+	writeToLog(logfile, msg);
 	for(chunk_number = 0; chunk_number < noOfChunks; chunk_number++)
 	{
 		if(sendResponse(all_chunks[chunk_number], logstash, logfile) != 0)
 			return error_code;
-		//printf("%s\n", all_chunks[chunk_number]);
+		//printf("Chunk number: %d\n%s\n", chunk_number+1, all_chunks[chunk_number]);
 		//printf("%s\n", raw_chunks[chunk_number]);
 		free(all_chunks[chunk_number]);
 		free(raw_chunks[chunk_number]);
 	}
-
-
-	// Logging
-	snprintf(msg, sizeof(msg) - 1, "Sent chunks from %s:%d to %s:%d", ucmdb->host, ucmdb->port, logstash->host, logstash->port);
+	snprintf(msg, sizeof(msg), "Chunks sent in total: %d", noOfChunks);
 	writeToLog(logfile, msg);
 
+	// Wait for all documents to get indexed in elasticsearch
+	snprintf(msg, sizeof(msg), "Waiting for %lu documents to get indexed in elasticsearch...", noOfDocs);
+	writeToLog(logfile, msg);
 
-	// create/update index alias for elasticsearch
-	struct connectionDetails elasticsearch;
-	strncpy(elasticsearch.host, "100.127.111.14", sizeof(elasticsearch.host));
-	elasticsearch.port = 9200;
+	// Wait until elasticsearch responds with message containing count
+	const char *count_str = "\"count\"";
+	char *count = NULL;
+	char *count_response = NULL;
+	const char *count_request = 
+	"GET /ucmdb/_count HTTP/1.0\r\n"
+	"Authorization: Basic bG9nc2VydmVyOmxvZ3NlcnZlcg==\r\n" //logserver:logserver
+	"Content-length: 0\r\n\r\n";
+	do {
+		free(count_response);
+		if((count_response = readResponse(count_request, &elasticsearch, logfile)) == NULL)
+			return error_code;
+
+		//printf("%s\n", count_response);
+
+	} while((count = strstr(count_response, count_str)) == NULL);
+
+	// Wait until number of documents stops increasing in specified interval
+	char count_buffer[1024];
+	const unsigned interval = 10;
+	do {
+		sleep(interval);
+		/*** copy string from count from "count" to the nearest "," char to count_buffer ***/
+		int i = 0;
+		while(*count != ',' && i < sizeof(count_buffer) - 1)
+		{
+			count_buffer[i] = *count;
+			++i;
+			++count;
+		}
+		count_buffer[i] = '\0';
+		/*** copy end  ***/
+		//printf("Old: %s\n", count_buffer);
+
+		free(count_response);
+		if((count_response = readResponse(count_request, &elasticsearch, logfile)) == NULL)
+			return error_code;
+
+		if((count = strstr(count_response, count_str)) == NULL)
+			return error_code;
+		//printf("New: %s\n", count);
+	} while(strstr(count_response, count_buffer) == NULL);
+
+	free(count_response);
+
+	// MAKE SURE WE HAVE ALL THE DOCUMENTS IN INDEX BEFORE CREATING ALIAS
+	char expected_count[50];
+	snprintf(expected_count, sizeof(expected_count), "\"count\":%lu", noOfDocs);
+	if(strstr(count_buffer, expected_count) == NULL)
+	{
+		snprintf(msg, sizeof(msg), "Timeout reached, received the following count: %s", count_buffer);
+		writeToLog(logfile, msg);
+		return error_code;
+	}
+	writeToLog(logfile, "All documents got indexed");
+
+	// CREATE INDEX ALIAS
+	writeToLog(logfile, "Creating vucmdb index alias...");
+	expected_response = "{\"acknowledged\":true}";
 	char elastic_data[1024];
 	char elastic_request[1024];
-	snprintf(elastic_data, sizeof(elastic_data) - 1,
-	"{\"actions\" : [{\"add\" : {\"index\" : \"ucmdb*\",\"alias\" : \"vucmdb\","
+	snprintf(elastic_data, sizeof(elastic_data),
+	"{\"actions\" : [{\"add\" : {\"index\" : \"ucmdb\",\"alias\" : \"vucmdb\","
 	"\"filter\" : { \"term\" : { \"timestamp_id\" : \"%s\" } }}}]}", timestamp);
 
-	snprintf(elastic_request, sizeof(elastic_request)-1,
+	snprintf(elastic_request, sizeof(elastic_request),
 	"POST /_aliases HTTP/1.0\r\n"
 	"Content-type: application/json\r\n"
 	"Content-length: %zu\r\n\r\n"
 	"%s", strlen(elastic_data), elastic_data);
 	char *elastic_response = NULL;
-	if((elastic_response = readResponse(elastic_request, &elasticsearch, logfile)) == NULL)
-		return error_code;
+	do {
+		free(elastic_response);
+		if((elastic_response = readResponse(elastic_request, &elasticsearch, logfile)) == NULL)
+			return error_code;
+	} while(strstr(elastic_response, expected_response) == NULL);
 
 	//printf("%s\n", elastic_response);
 	free(elastic_response);
+	writeToLog(logfile, "Alias created");
+
 	return 0;
 }
 
@@ -1149,14 +1325,14 @@ int main(int argc, char *argv[])
 		// Read ucmdb config file
 		struct connectionDetails ucmdb;
 		struct connectionDetails ucmdb_logstash;
-		const char *ucmdb_log = "/var/log/httpbeat/ucmdb.log";
+		const char *ucmdb_log = "ucmdb.log";
 		const char *ucmdb_config = "/etc/httpbeat/ucmdb.conf";
 
 		if(readConfig(ucmdb_config, ucmdb_log, &ucmdb, &ucmdb_logstash, 1) != 0)
 			return -1;
 
-		for(;;)
-		{
+		//for(;;)
+		//{
 			if(sendUcmdbInChunks(&ucmdb, &ucmdb_logstash, ucmdb_log) != 0)
 			{
 				fprintf(stderr, "UCMDB function exited with error code\n");
@@ -1164,8 +1340,8 @@ int main(int argc, char *argv[])
 			}
 
 
-			sleep(300);
-		}
+		//	sleep(300);
+		//}
 
 		// Deallocate resources
 		free(ucmdb.base64);
@@ -1175,7 +1351,7 @@ int main(int argc, char *argv[])
 		// Read zabbix config file
 		struct connectionDetails zabbix;
 		struct connectionDetails zabbix_logstash;
-		const char *zabbix_log = "/var/log/httpbeat/zabbix.log";
+		const char *zabbix_log = "zabbix.log";
 		const char *zabbix_config = "/etc/httpbeat/zabbix.conf";
 
 
@@ -1191,13 +1367,13 @@ int main(int argc, char *argv[])
 				return -1;
 			}
 			*/
-			if(sendZabbixResponse(&zabbix, &zabbix_logstash, zabbix_log) != 0)
+			if(sendZabbixResponse(&zabbix, &zabbix_logstash, zabbix_log, zabbix_config) != 0)
 			{
 				fprintf(stderr, "ZABBIX function exited with error code\n");
 				return -1;
 			}
 
-			sleep(300);
+			sleep(60);
 		}
 	}
 
