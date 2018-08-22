@@ -30,6 +30,12 @@ class NodeStats
     std::unordered_map<std::string, std::string> process;
     void process_pid(const char *);
 
+    std::unordered_map<std::string, uint64_t> zombie;
+    void zombie_count();
+
+    std::unordered_map<std::string, uint64_t> processor;
+    void cpu_stats();
+
     public:
         NodeStats(){};
 
@@ -41,6 +47,10 @@ class NodeStats
         std::unordered_map<std::string, uint64_t> get_swap_stats(){swap_stats();return swap;};
         // sshd pid
         std::unordered_map<std::string, std::string> get_sshd_pid(){process_pid("sshd");return process;};
+        // number of zombie processes
+        std::unordered_map<std::string, uint64_t> get_zombie_count(){zombie_count();return zombie;};
+        // cpu stats
+        std::unordered_map<std::string, uint64_t> get_cpu_stats(){cpu_stats();return processor;};
 };
 
 template<typename T>
@@ -238,12 +248,84 @@ void NodeStats::process_pid(const char *name)
     closedir(dir);
 }
 
+void NodeStats::zombie_count()
+{
+    DIR *dir;
+    std::ifstream stat;
+    std::string line;
+    uint64_t count = 0;
+    std::istringstream iss;
+    std::string tmp, third_field;
+    char filename[300];
+    struct dirent *ent;
+    if((dir = opendir("/proc")) == NULL) return;
+
+    while((ent = readdir(dir)) != NULL)
+    {
+        if(ent->d_type != DT_DIR) continue;
+        //std::cout << ent->d_name << std::endl;
+        snprintf(filename, 7, "/proc/");
+        strcat(filename, ent->d_name);
+        strcat(filename, "/stat");
+        stat.open(filename);
+        /*** read /proc/pid/stat if present ***/
+        if(!stat.good()) continue;
+        std::getline(stat, line);
+        stat.close();
+
+        /*** if third field is Z then increment the count ***/
+        iss.str(line);
+        iss >> tmp >> tmp >> third_field;
+        //std::cout << third_field << std::endl;
+        if(third_field == "Z") ++count;
+    }
+
+    zombie.insert({"node_stats.zombie_processes.count", count});
+    closedir(dir);
+}
+
+void NodeStats::cpu_stats()
+{
+    std::string line;
+    std::ifstream stat;
+    uint64_t idle_time[2];
+    uint64_t busy_time[2];
+    uint64_t total_time[2];
+    uint64_t iowait_time[2];
+
+    for(int i = 0; i < 2; i++)
+    {
+        stat.open("/proc/stat");
+        if(!std::getline(stat, line)) return;
+        stat.close();
+
+        std::istringstream istream(line);
+        std::string cpu;
+        uint64_t user, nice, system, idle, iowait, irq, softirq, steal, guest, guest_nice;
+        istream >> cpu >> user >> nice >> system >> idle >> iowait >> irq >> softirq >> steal >> guest >> guest_nice;
+
+        iowait_time[i] = iowait;
+        idle_time[i] = idle + iowait;
+        busy_time[i] = user + nice + system + irq + softirq + steal + guest + guest_nice;
+        total_time[i] = idle_time[i] + busy_time[i];
+
+        sleep(1);
+    }
+
+    uint64_t busy_time_percent = 100 * (busy_time[1] - busy_time[0]) / (total_time[1] - total_time[0]);
+    uint64_t iowait_percent = 100 * (iowait_time[1] - iowait_time[0]) / (total_time[1] - total_time[0]);
+    processor.insert({"node_stats.cpu.busy.percent", busy_time_percent});
+    processor.insert({"node_stats.cpu.iowait.percent", iowait_percent});
+}
+
 int main()
 {
     NodeStats stats;
     //std::cout << stats.get_swap_stats() << std::endl;
     //std::cout << stats.get_fs_stats() << std::endl;
-    std::cout << stats.get_sshd_pid() << std::endl;
+    //std::cout << stats.get_sshd_pid() << std::endl;
+    //std::cout << stats.get_zombie_count() << std::endl;
+    std::cout << stats.get_cpu_stats() << std::endl;
 
     return 0;
 }
