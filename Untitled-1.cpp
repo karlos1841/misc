@@ -1,11 +1,13 @@
 #include <iostream>
 #include <cstdio>
 #include <cstring>
-#include <unistd.h>
 #include <climits>
 #include <unordered_map>
 #include <sstream>
 #include <fstream>
+#include <typeinfo>
+#include <ctime>
+#include <unistd.h>
 #include <mntent.h>
 #include <dirent.h>
 #include <sys/types.h>
@@ -45,13 +47,100 @@ class NodeStats
         std::unordered_map<std::string, uint64_t> get_fs_stats(){fs_stats();return fs;};
         // swap usage
         std::unordered_map<std::string, uint64_t> get_swap_stats(){swap_stats();return swap;};
-        // sshd pid
-        std::unordered_map<std::string, std::string> get_sshd_pid(){process_pid("sshd");return process;};
+        // sshd, syslogd pid
+        std::unordered_map<std::string, std::string> get_processes_pid(){process_pid("sshd");process_pid("syslogd");return process;};
         // number of zombie processes
         std::unordered_map<std::string, uint64_t> get_zombie_count(){zombie_count();return zombie;};
         // cpu stats
         std::unordered_map<std::string, uint64_t> get_cpu_stats(){cpu_stats();return processor;};
 };
+
+unsigned long hostnameToIP(const char *hostname)
+{
+	struct addrinfo hints, *info;
+	struct sockaddr_in *s;
+	unsigned long IP = 0;
+
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_INET;
+	hints.ai_socktype = SOCK_STREAM;
+
+	if(getaddrinfo(hostname, NULL, &hints, &info) != 0)
+		return 0;
+
+	s = (struct sockaddr_in *)info->ai_addr;
+	IP = s->sin_addr.s_addr;
+	freeaddrinfo(info);
+
+	return IP;
+}
+
+int sendData(const char *data, const char *host, unsigned short port)
+{
+	int socket_descriptor;
+	struct sockaddr_in server_info;
+	ssize_t status, total;
+	const int error_code = -1;
+
+	if((socket_descriptor = socket(AF_INET, SOCK_STREAM, 0)) == -1)
+    {
+        //const char *msg = "[Error] could not create socket";
+        return error_code;
+    }
+
+    memset(&server_info, 0, sizeof(server_info));
+    server_info.sin_family = AF_INET;
+    server_info.sin_port = htons(port);
+    if((server_info.sin_addr.s_addr = hostnameToIP(host)) == 0)
+    {
+        //const char *msg = "[Error] incorrect address was given";
+        return error_code;
+    }
+    if(connect(socket_descriptor, (struct sockaddr *)&server_info, sizeof(server_info)) == -1)
+    {
+        //char msg[1024];
+		//snprintf(msg, sizeof(msg), "[Error] could not create connection to %s:%u", inet_ntoa(server_info.sin_addr), port);
+        return error_code;
+    }
+
+	total = strlen(data);
+    do
+    {
+        status = write(socket_descriptor, data, total);
+        if(status == -1)
+        {
+            //const char *msg = "[Error] could not send data to socket";
+            return error_code;
+        }
+    } while(status < total);
+	//printf("%zd\n", status);
+	//printf("%s\n", response);
+
+	close(socket_descriptor);
+	return 0;
+}
+
+int sendDataToElasticsearch(const std::string &data, const char *index, const char *host, unsigned short port)
+{
+    // ISO8601 UTC timestamp
+	struct tm *timeinfo;
+	time_t rawtime = time(NULL);
+	char timestamp[30];
+	timeinfo = gmtime(&rawtime);
+	strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ", timeinfo);
+    std::string data_str = data;
+    data_str.pop_back();
+    std::string elastic_data = data_str + ",\"@timestamp\": " + "\"" + timestamp + "\"}\n";
+
+
+    std::string elastic_request = "POST /" + std::string(index) + "/" + std::string(index) + " HTTP/1.0\r\n" +
+	"Content-type: application/json\r\n" +
+	"Content-length: " + std::to_string(elastic_data.size()) + "\r\n\r\n" +
+	elastic_data;
+
+    std::cout << elastic_request << std::endl;
+    return sendData(elastic_request.c_str(), host, port);
+}
 
 template<typename T>
 std::ostream& operator<<(std::ostream& stream, const std::unordered_map<std::string, T> map)
@@ -111,29 +200,36 @@ std::string& operator<<(std::string& output, const std::unordered_map<std::strin
 template std::string& operator<<(std::string& output, const std::unordered_map<std::string, std::string> map);
 template std::string& operator<<(std::string& output, const std::unordered_map<std::string, uint64_t> map);
 
-template<typename T1, typename T2>
-std::string operator+(const std::unordered_map<std::string, T1> mapOne, const std::unordered_map<std::string, T2> mapTwo)
+template<typename T>
+std::string operator+(std::string sum, const std::unordered_map<std::string, T> map)
 {
-    std::string sum, tmp;
-    sum << mapOne;
-    sum.pop_back();
-    sum += ",";
-    tmp << mapTwo;
-    sum += tmp.erase(0, 1);
+    if(map.empty())
+        return sum;
+
+    std::string tmp;
+    tmp << map;
+    if(!sum.empty())
+    {
+        sum.pop_back();
+        sum += ",";
+        sum += tmp.erase(0, 1);
+    }
+    else
+    {
+        sum += tmp;
+    }
 
     return sum;
 }
-template std::string operator+(const std::unordered_map<std::string, std::string> mapOne, const std::unordered_map<std::string, uint64_t> mapTwo);
-template std::string operator+(const std::unordered_map<std::string, uint64_t> mapOne, const std::unordered_map<std::string, std::string> mapTwo);
-template std::string operator+(const std::unordered_map<std::string, std::string> mapOne, const std::unordered_map<std::string, std::string> mapTwo);
-template std::string operator+(const std::unordered_map<std::string, uint64_t> mapOne, const std::unordered_map<std::string, uint64_t> mapTwo);
+template std::string operator+(std::string sum, const std::unordered_map<std::string, std::string> map);
+template std::string operator+(std::string sum, const std::unordered_map<std::string, uint64_t> map);
 
 void NodeStats::hostname_ip()
 {
     char hostname[HOST_NAME_MAX];
     if(gethostname(hostname, HOST_NAME_MAX) != 0)
         return;
-    address.insert({"source_node.host", hostname});
+    address.insert({"source_node_host", hostname});
 
 	struct addrinfo hints, *info;
 	struct sockaddr_in *s;
@@ -149,7 +245,7 @@ void NodeStats::hostname_ip()
 	s = (struct sockaddr_in *)info->ai_addr;
     snprintf(ip, sizeof(ip), "%s", inet_ntoa(s->sin_addr));
 	freeaddrinfo(info);
-    address.insert({"source_node.ip", ip});
+    address.insert({"source_node_ip", ip});
 }
 
 void NodeStats::fs_stats()
@@ -169,9 +265,9 @@ void NodeStats::fs_stats()
         uint64_t space_total = buf.f_bsize * buf.f_blocks;
         uint64_t space_free = buf.f_bsize * buf.f_bfree;
         uint64_t space_used = space_total - space_free;
-        std::string space_total_str = "node_stats." + std::string(fstab->mnt_dir) + ".space.total_in_bytes";
-        std::string space_free_str = "node_stats." + std::string(fstab->mnt_dir) + ".space.free_in_bytes";
-        std::string space_used_str = "node_stats." + std::string(fstab->mnt_dir) + ".space.used_in_bytes";
+        std::string space_total_str = "node_stats_" + std::string(fstab->mnt_dir) + "_space_total_in_bytes";
+        std::string space_free_str = "node_stats_" + std::string(fstab->mnt_dir) + "_space_free_in_bytes";
+        std::string space_used_str = "node_stats_" + std::string(fstab->mnt_dir) + "_space_used_in_bytes";
         fs.insert({space_total_str, space_total});
         fs.insert({space_free_str, space_free});
         fs.insert({space_used_str, space_used});
@@ -179,9 +275,9 @@ void NodeStats::fs_stats()
         uint64_t inode_total = buf.f_files;
         uint64_t inode_free = buf.f_ffree;
         uint64_t inode_used = inode_total - inode_free;
-        std::string inode_total_str = "node_stats." + std::string(fstab->mnt_dir) + ".inode.total";
-        std::string inode_free_str = "node_stats." + std::string(fstab->mnt_dir) + ".inode.free";
-        std::string inode_used_str = "node_stats." + std::string(fstab->mnt_dir) + ".inode.used";
+        std::string inode_total_str = "node_stats_" + std::string(fstab->mnt_dir) + "_inode_total";
+        std::string inode_free_str = "node_stats_" + std::string(fstab->mnt_dir) + "_inode_free";
+        std::string inode_used_str = "node_stats_" + std::string(fstab->mnt_dir) + "_inode_used";
         fs.insert({inode_total_str, inode_total});
         fs.insert({inode_free_str, inode_free});
         fs.insert({inode_used_str, inode_used});
@@ -189,7 +285,8 @@ void NodeStats::fs_stats()
 
 
     endmntent(file);
-    fclose(file);
+    // on CentOS7 double free error
+    //fclose(file);
 }
 
 void NodeStats::swap_stats()
@@ -206,9 +303,9 @@ void NodeStats::swap_stats()
     iss >> tmp >> tmp >> swap_total >> swap_used;
     swap_free = swap_total - swap_used;
 
-    swap.insert({"node_stats.swap.space.total_in_kilobytes", swap_total});
-    swap.insert({"node_stats.swap.space.free_in_kilobytes", swap_free});
-    swap.insert({"node_stats.swap.space.used_in_kilobytes", swap_used});
+    swap.insert({"node_stats_swap_space_total_in_kilobytes", swap_total});
+    swap.insert({"node_stats_swap_space_free_in_kilobytes", swap_free});
+    swap.insert({"node_stats_swap_space_used_in_kilobytes", swap_used});
 
     ifs.close();
 }
@@ -219,7 +316,7 @@ void NodeStats::process_pid(const char *name)
     std::ifstream cmdline;
     std::string line;
     std::size_t found;
-    std::string pid_str = "node_stats." + std::string(name) + ".pid";
+    std::string pid_str = "node_stats_" + std::string(name) + "_pid";
     char filename[300];
     struct dirent *ent;
     if((dir = opendir("/proc")) == NULL) return;
@@ -280,7 +377,7 @@ void NodeStats::zombie_count()
         if(third_field == "Z") ++count;
     }
 
-    zombie.insert({"node_stats.zombie_processes.count", count});
+    zombie.insert({"node_stats_zombie_processes_count", count});
     closedir(dir);
 }
 
@@ -314,18 +411,32 @@ void NodeStats::cpu_stats()
 
     uint64_t busy_time_percent = 100 * (busy_time[1] - busy_time[0]) / (total_time[1] - total_time[0]);
     uint64_t iowait_percent = 100 * (iowait_time[1] - iowait_time[0]) / (total_time[1] - total_time[0]);
-    processor.insert({"node_stats.cpu.busy.percent", busy_time_percent});
-    processor.insert({"node_stats.cpu.iowait.percent", iowait_percent});
+    processor.insert({"node_stats_cpu_busy_percent", busy_time_percent});
+    processor.insert({"node_stats_cpu_iowait_percent", iowait_percent});
 }
 
 int main()
 {
-    NodeStats stats;
-    //std::cout << stats.get_swap_stats() << std::endl;
-    //std::cout << stats.get_fs_stats() << std::endl;
-    //std::cout << stats.get_sshd_pid() << std::endl;
-    //std::cout << stats.get_zombie_count() << std::endl;
-    std::cout << stats.get_cpu_stats() << std::endl;
+    // child code
+    //if(fork() == 0)
+    //{
+        //for(;;)
+        //{
+            NodeStats stats;
+            std::string json_output;
+            json_output = json_output + stats.get_hostname_ip() + stats.get_fs_stats() +
+                        stats.get_swap_stats() + stats.get_processes_pid() + stats.get_zombie_count() +
+                        stats.get_cpu_stats();
 
+            //std::cout << json_output << std::endl;
+            //sendData(json_output.c_str(), "127.0.0.1", 6106);
+            sendDataToElasticsearch(json_output, "marvel_new", "127.0.0.1", 9200);
+
+            //std::cout << stats.get_cpu_stats() << std::endl;
+            sleep(1);
+        //}
+    //}
+
+    // orphaning child
     return 0;
 }
