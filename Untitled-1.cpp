@@ -19,6 +19,7 @@
 
 class NodeStats
 {
+    // OS
     std::unordered_map<std::string, std::string> address;
     void hostname_ip();
 
@@ -38,8 +39,17 @@ class NodeStats
     std::unordered_map<std::string, uint64_t> processor;
     void cpu_stats();
 
+
+
+
+    // API
+    const char *elasticsearchIP;
+    const unsigned short elasticsearchPort;
+    std::unordered_map<std::string, uint64_t> docs;
+    void docs_count();
+
     public:
-        NodeStats(){};
+        NodeStats(const char *elasticsearchIP, const unsigned short elasticsearchPort):elasticsearchIP(elasticsearchIP), elasticsearchPort(elasticsearchPort){};
 
         // hostname, IP
         std::unordered_map<std::string, std::string> get_hostname_ip(){hostname_ip();return address;};
@@ -53,6 +63,10 @@ class NodeStats
         std::unordered_map<std::string, uint64_t> get_zombie_count(){zombie_count();return zombie;};
         // cpu stats
         std::unordered_map<std::string, uint64_t> get_cpu_stats(){cpu_stats();return processor;};
+
+
+        // API stats
+        std::unordered_map<std::string, uint64_t> get_docs_count(){docs_count();return docs;};
 };
 
 unsigned long hostnameToIP(const char *hostname)
@@ -73,6 +87,104 @@ unsigned long hostnameToIP(const char *hostname)
 	freeaddrinfo(info);
 
 	return IP;
+}
+
+// remove headers from webserver's response
+const char *remove_headers(char **response)
+{
+	const char *content = *response;
+	char *tmp_ptr = NULL;
+	while(strstr(content, "\r\n\r\n") != NULL)
+	{
+		content += 4;
+	}
+	tmp_ptr = (char *)calloc(strlen(content) + 1, sizeof(char));
+	strncpy(tmp_ptr, content, strlen(content));
+
+	// free old memory
+	free(*response);
+	// assign new memory
+	*response = tmp_ptr;
+
+	return *response;
+}
+
+// returns NULL on error, on success - address to dynamically allocated buffer containing response
+// remember to free the memory using the pointer returned from this function
+char *readResponse(const char *request, const char *host, unsigned short port)
+{
+	char *response = NULL;
+	int socket_descriptor;
+	ssize_t status, total;
+	size_t count = 1024; // starting response size
+	unsigned long bytes_read = 0;
+	unsigned long cur_size = 0;
+	struct sockaddr_in server_info;
+	char *error_code = NULL;
+
+	unsetenv("http_proxy");
+
+	//printf("%s\n", request);
+
+	if((socket_descriptor = socket(AF_INET, SOCK_STREAM, 0)) == -1)
+	{
+		//const char *msg = "[Error] could not create socket";
+		return error_code;
+	}
+
+	memset(&server_info, 0, sizeof(server_info));
+	server_info.sin_family = AF_INET;
+	server_info.sin_port = htons(port);
+	if((server_info.sin_addr.s_addr = hostnameToIP(host)) == 0)
+	{
+		//const char *msg = "[Error] incorrect address was given";
+		return error_code;
+	}
+	//printf("%s\n", inet_ntoa(server_info.sin_addr));
+	if(connect(socket_descriptor, (struct sockaddr *)&server_info, sizeof(server_info)) == -1)
+	{
+		//char msg[1024];
+		//snprintf(msg, sizeof(msg), "[Error] could not create connection to %s:%u", inet_ntoa(server_info.sin_addr), port);
+		return error_code;
+	}
+
+	total = strlen(request);
+	do
+	{
+		status = write(socket_descriptor, request, total);
+		if(status == -1)
+		{
+			//const char *msg = "[Error] could not send data to socket";
+			return error_code;
+		}
+	} while(status < total);
+
+	do
+	{
+		if(bytes_read+count >= cur_size)
+		{
+			char *tmp;
+			cur_size+=count;
+			tmp = (char *)realloc(response, cur_size);
+			if(tmp == NULL)
+			{
+				//const char *msg = "[Error] failed to reallocate memory";
+				return error_code;
+			}
+
+			response = tmp;
+			// set expanded memory to 0
+			memset(response + cur_size - count, 0, count);
+		}
+
+		if((status = read(socket_descriptor, response+bytes_read, count)) > 0)
+		{
+			bytes_read+=status;
+		}
+	} while(status > 0);
+
+	close(socket_descriptor);
+	return response;
 }
 
 int sendData(const char *data, const char *host, unsigned short port)
@@ -143,7 +255,7 @@ int sendDataToElasticsearch(const std::string &data, const char *index, const ch
 }
 
 template<typename T>
-std::ostream& operator<<(std::ostream& stream, const std::unordered_map<std::string, T> map)
+std::ostream &operator<<(std::ostream &stream, const std::unordered_map<std::string, T> &map)
 {
     if(typeid(std::string) == typeid(T))
     {
@@ -167,11 +279,11 @@ std::ostream& operator<<(std::ostream& stream, const std::unordered_map<std::str
     }
     return stream;
 }
-template std::ostream& operator<<(std::ostream& stream, const std::unordered_map<std::string, std::string> map);
-template std::ostream& operator<<(std::ostream& stream, const std::unordered_map<std::string, uint64_t> map);
+template std::ostream &operator<<(std::ostream &stream, const std::unordered_map<std::string, std::string> &map);
+template std::ostream &operator<<(std::ostream &stream, const std::unordered_map<std::string, uint64_t> &map);
 
 template<typename T>
-std::string& operator<<(std::string& output, const std::unordered_map<std::string, T> map)
+std::string &operator<<(std::string &output, const std::unordered_map<std::string, T> &map)
 {
     std::stringstream ss;
     if(typeid(std::string) == typeid(T))
@@ -197,11 +309,11 @@ std::string& operator<<(std::string& output, const std::unordered_map<std::strin
     output += ss.str();
     return output;
 }
-template std::string& operator<<(std::string& output, const std::unordered_map<std::string, std::string> map);
-template std::string& operator<<(std::string& output, const std::unordered_map<std::string, uint64_t> map);
+template std::string &operator<<(std::string &output, const std::unordered_map<std::string, std::string> &map);
+template std::string &operator<<(std::string &output, const std::unordered_map<std::string, uint64_t> &map);
 
 template<typename T>
-std::string operator+(std::string sum, const std::unordered_map<std::string, T> map)
+std::string &operator+(std::string &sum, const std::unordered_map<std::string, T> &map)
 {
     if(map.empty())
         return sum;
@@ -221,8 +333,23 @@ std::string operator+(std::string sum, const std::unordered_map<std::string, T> 
 
     return sum;
 }
-template std::string operator+(std::string sum, const std::unordered_map<std::string, std::string> map);
-template std::string operator+(std::string sum, const std::unordered_map<std::string, uint64_t> map);
+template std::string &operator+(std::string &sum, const std::unordered_map<std::string, std::string> &map);
+template std::string &operator+(std::string &sum, const std::unordered_map<std::string, uint64_t> &map);
+
+void NodeStats::docs_count()
+{
+    const char *elastic_request = "GET /_cat/count HTTP/1.0\r\n\r\n";
+    const char *response = readResponse(elastic_request, elasticsearchIP, elasticsearchPort);
+    response = remove_headers((char **)&response);
+    std::istringstream stream(response);
+    std::string tmp;
+    uint64_t count;
+    stream >> tmp >> tmp >> count;
+    docs.insert({"node_stats_docs_count", count});
+
+
+    free((char *)response);
+}
 
 void NodeStats::hostname_ip()
 {
@@ -422,18 +549,19 @@ int main()
     //{
         //for(;;)
         //{
-            NodeStats stats;
+            NodeStats stats("127.0.0.1", 9200);
             std::string json_output;
-            json_output = json_output + stats.get_hostname_ip() + stats.get_fs_stats() +
-                        stats.get_swap_stats() + stats.get_processes_pid() + stats.get_zombie_count() +
-                        stats.get_cpu_stats();
+            json_output = json_output + stats.get_docs_count();
+            //json_output = json_output + stats.get_hostname_ip() + stats.get_fs_stats() +
+            //            stats.get_swap_stats() + stats.get_processes_pid() + stats.get_zombie_count() +
+            //            stats.get_cpu_stats();
 
-            //std::cout << json_output << std::endl;
+            std::cout << json_output << std::endl;
             //sendData(json_output.c_str(), "127.0.0.1", 6106);
-            sendDataToElasticsearch(json_output, "marvel_new", "127.0.0.1", 9200);
+            //sendDataToElasticsearch(json_output, "marvel_new", "127.0.0.1", 9200);
 
             //std::cout << stats.get_cpu_stats() << std::endl;
-            sleep(1);
+            //sleep(60);
         //}
     //}
 
