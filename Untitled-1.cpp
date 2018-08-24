@@ -109,6 +109,19 @@ const char *remove_headers(char **response)
 	return *response;
 }
 
+unsigned short getHttpStatus(const char *response)
+{
+	std::string dest(response);
+	char *ptr;
+	ptr = strtok((char *)dest.c_str(), " ");
+	ptr = strtok(NULL, " ");
+	if(ptr == NULL)
+		return 0;
+	//printf("%s", ptr);
+
+	return strtol(ptr, NULL, 0);
+}
+
 // returns NULL on error, on success - address to dynamically allocated buffer containing response
 // remember to free the memory using the pointer returned from this function
 char *readResponse(const char *request, const char *host, unsigned short port)
@@ -340,6 +353,8 @@ void NodeStats::docs_count()
 {
     const char *elastic_request = "GET /_cat/count HTTP/1.0\r\n\r\n";
     const char *response = readResponse(elastic_request, elasticsearchIP, elasticsearchPort);
+    if(response == NULL) return;
+    if(getHttpStatus(response) != 200) return;
     response = remove_headers((char **)&response);
     std::istringstream stream(response);
     std::string tmp;
