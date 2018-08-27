@@ -43,16 +43,22 @@ class NodeStats
 
 
     // API
+    const char *nodeIP;
     const char *elasticsearchIP;
     const unsigned short elasticsearchPort;
+
     std::unordered_map<std::string, uint64_t> docs;
-    void docs_count();
+    const char *docs_count();
+
+    std::unordered_map<std::string, uint64_t> thread_pool;
+    const char *thread_pool_stats();
 
     public:
-        NodeStats(const char *elasticsearchIP, const unsigned short elasticsearchPort):elasticsearchIP(elasticsearchIP), elasticsearchPort(elasticsearchPort){};
+        NodeStats(const char *elasticsearchIP, const unsigned short elasticsearchPort):elasticsearchIP(elasticsearchIP), elasticsearchPort(elasticsearchPort)
+        {hostname_ip();};
 
-        // hostname, IP
-        std::unordered_map<std::string, std::string> get_hostname_ip(){hostname_ip();return address;};
+        // hostname, IP called in constructor in order to initialize nodeIP
+        std::unordered_map<std::string, std::string> get_hostname_ip(){return address;};
         // filesystem disk usage
         std::unordered_map<std::string, uint64_t> get_fs_stats(){fs_stats();return fs;};
         // swap usage
@@ -66,7 +72,8 @@ class NodeStats
 
 
         // API stats
-        std::unordered_map<std::string, uint64_t> get_docs_count(){docs_count();return docs;};
+        std::unordered_map<std::string, uint64_t> get_docs_count(){free((char *)docs_count());return docs;};
+        std::unordered_map<std::string, uint64_t> get_thread_pool_stats(){free((char *)thread_pool_stats());return thread_pool;};
 };
 
 unsigned long hostnameToIP(const char *hostname)
@@ -349,12 +356,12 @@ std::string &operator+(std::string &sum, const std::unordered_map<std::string, T
 template std::string &operator+(std::string &sum, const std::unordered_map<std::string, std::string> &map);
 template std::string &operator+(std::string &sum, const std::unordered_map<std::string, uint64_t> &map);
 
-void NodeStats::docs_count()
+const char *NodeStats::docs_count()
 {
     const char *elastic_request = "GET /_cat/count HTTP/1.0\r\n\r\n";
     const char *response = readResponse(elastic_request, elasticsearchIP, elasticsearchPort);
-    if(response == NULL) return;
-    if(getHttpStatus(response) != 200) return;
+    if(response == NULL) return response;
+    if(getHttpStatus(response) != 200) return response;
     response = remove_headers((char **)&response);
     std::istringstream stream(response);
     std::string tmp;
@@ -363,7 +370,43 @@ void NodeStats::docs_count()
     docs.insert({"node_stats_docs_count", count});
 
 
-    free((char *)response);
+    return response;
+}
+
+const char *NodeStats::thread_pool_stats()
+{
+    const std::string elastic_request = "GET /_nodes/" + std::string(nodeIP) + "/stats/thread_pool HTTP/1.0\r\n\r\n";
+    const char *response = readResponse(elastic_request.c_str(), elasticsearchIP, elasticsearchPort);
+    if(response == NULL) return response;
+    if(getHttpStatus(response) != 200) return response;
+    response = remove_headers((char **)&response);
+
+    const char *thread_pool_ptr = NULL;
+    if((thread_pool_ptr = strstr(response, "thread_pool")) == NULL) return response;
+
+    const char *ptr = NULL;
+    const size_t rejected = strlen("rejected\":");
+    if((ptr = strstr(thread_pool_ptr, "bulk")) == NULL) return response;
+    if((ptr = strstr(ptr, "rejected\":")) == NULL) return response;
+    ptr += rejected;
+    uint64_t bulk_rejected = strtol(ptr, NULL, 0);
+
+    if((ptr = strstr(thread_pool_ptr, "index")) == NULL) return response;
+    if((ptr = strstr(ptr, "rejected\":")) == NULL) return response;
+    ptr += rejected;
+    uint64_t index_rejected = strtol(ptr, NULL, 0);
+
+    if((ptr = strstr(thread_pool_ptr, "search")) == NULL) return response;
+    if((ptr = strstr(ptr, "rejected\":")) == NULL) return response;
+    ptr += rejected;
+    uint64_t search_rejected = strtol(ptr, NULL, 0);
+
+
+    thread_pool.insert({"node_stats_thread_pool_bulk_rejected", bulk_rejected});
+    thread_pool.insert({"node_stats_thread_pool_index_rejected", index_rejected});
+    thread_pool.insert({"node_stats_thread_pool_search_rejected", search_rejected});
+
+    return response;
 }
 
 void NodeStats::hostname_ip()
@@ -375,7 +418,7 @@ void NodeStats::hostname_ip()
 
 	struct addrinfo hints, *info;
 	struct sockaddr_in *s;
-    char ip[16];
+    static char ip[16];
 
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = AF_INET;
@@ -388,6 +431,7 @@ void NodeStats::hostname_ip()
     snprintf(ip, sizeof(ip), "%s", inet_ntoa(s->sin_addr));
 	freeaddrinfo(info);
     address.insert({"source_node_ip", ip});
+    nodeIP = ip;
 }
 
 void NodeStats::fs_stats()
@@ -566,7 +610,8 @@ int main()
         //{
             NodeStats stats("127.0.0.1", 9200);
             std::string json_output;
-            json_output = json_output + stats.get_docs_count();
+            json_output = json_output + stats.get_thread_pool_stats();
+            //json_output = json_output + stats.get_docs_count();
             //json_output = json_output + stats.get_hostname_ip() + stats.get_fs_stats() +
             //            stats.get_swap_stats() + stats.get_processes_pid() + stats.get_zombie_count() +
             //            stats.get_cpu_stats();
