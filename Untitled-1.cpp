@@ -17,65 +17,9 @@
 #include <netdb.h>
 #include <sys/vfs.h> // get filesystem statistics
 
-class NodeStats
-{
-    // OS
-    std::unordered_map<std::string, std::string> address;
-    void hostname_ip();
-
-    std::unordered_map<std::string, uint64_t> fs;
-    // retrieve mountpoints from /etc/fstab excluding swap and print filesystem statistics
-    void fs_stats();
-
-    std::unordered_map<std::string, uint64_t> swap;
-    void swap_stats();
-
-    std::unordered_map<std::string, std::string> process;
-    void process_pid(const char *);
-
-    std::unordered_map<std::string, uint64_t> zombie;
-    void zombie_count();
-
-    std::unordered_map<std::string, uint64_t> processor;
-    void cpu_stats();
-
-
-
-
-    // API
-    const char *nodeIP;
-    const char *elasticsearchIP;
-    const unsigned short elasticsearchPort;
-
-    std::unordered_map<std::string, uint64_t> docs;
-    const char *docs_count();
-
-    std::unordered_map<std::string, uint64_t> thread_pool;
-    const char *thread_pool_stats();
-
-    public:
-        NodeStats(const char *elasticsearchIP, const unsigned short elasticsearchPort):elasticsearchIP(elasticsearchIP), elasticsearchPort(elasticsearchPort)
-        {hostname_ip();};
-
-        // hostname, IP called in constructor in order to initialize nodeIP
-        std::unordered_map<std::string, std::string> get_hostname_ip(){return address;};
-        // filesystem disk usage
-        std::unordered_map<std::string, uint64_t> get_fs_stats(){fs_stats();return fs;};
-        // swap usage
-        std::unordered_map<std::string, uint64_t> get_swap_stats(){swap_stats();return swap;};
-        // sshd, syslogd pid
-        std::unordered_map<std::string, std::string> get_processes_pid(){process_pid("sshd");process_pid("syslogd");return process;};
-        // number of zombie processes
-        std::unordered_map<std::string, uint64_t> get_zombie_count(){zombie_count();return zombie;};
-        // cpu stats
-        std::unordered_map<std::string, uint64_t> get_cpu_stats(){cpu_stats();return processor;};
-
-
-        // API stats
-        std::unordered_map<std::string, uint64_t> get_docs_count(){free((char *)docs_count());return docs;};
-        std::unordered_map<std::string, uint64_t> get_thread_pool_stats(){free((char *)thread_pool_stats());return thread_pool;};
-};
-
+/********************************/
+/********************************/
+/*** GENERIC HELPER FUNCTIONS ***/
 unsigned long hostnameToIP(const char *hostname)
 {
 	struct addrinfo hints, *info;
@@ -355,49 +299,110 @@ std::string &operator+(std::string &sum, const std::unordered_map<std::string, T
 }
 template std::string &operator+(std::string &sum, const std::unordered_map<std::string, std::string> &map);
 template std::string &operator+(std::string &sum, const std::unordered_map<std::string, uint64_t> &map);
+/*** END OF GENERIC HELPER FUNCTIONS ***/
+/***************************************/
+/***************************************/
 
-const char *NodeStats::docs_count()
+
+class NodeStats
 {
-    const char *elastic_request = "GET /_cat/count HTTP/1.0\r\n\r\n";
-    const char *response = readResponse(elastic_request, elasticsearchIP, elasticsearchPort);
-    if(response == NULL) return response;
-    if(getHttpStatus(response) != 200) return response;
-    response = remove_headers((char **)&response);
-    std::istringstream stream(response);
-    std::string tmp;
-    uint64_t count;
-    stream >> tmp >> tmp >> count;
-    docs.insert({"node_stats_docs_count", count});
+    // OS
+    std::unordered_map<std::string, std::string> address;
+    void hostname_ip(const char **);
+
+    std::unordered_map<std::string, uint64_t> fs;
+    // retrieve mountpoints from /etc/fstab excluding swap and print filesystem statistics
+    void fs_stats();
+
+    std::unordered_map<std::string, uint64_t> swap;
+    void swap_stats();
+
+    std::unordered_map<std::string, std::string> process;
+    void process_pid(const char *);
+
+    std::unordered_map<std::string, uint64_t> zombie;
+    void zombie_count();
+
+    std::unordered_map<std::string, uint64_t> processor;
+    void cpu_stats();
 
 
-    return response;
-}
 
-const char *NodeStats::thread_pool_stats()
+
+    // API
+    const char *api_response;
+
+    std::unordered_map<std::string, uint64_t> thread_pool;
+    void thread_pool_stats();
+
+    std::unordered_map<std::string, uint64_t> api_process;
+    void api_process_stats();
+
+    std::unordered_map<std::string, uint64_t> jvm;
+    void jvm_stats();
+
+    std::unordered_map<std::string, uint64_t> indices;
+    void indices_stats();
+
+    std::unordered_map<std::string, uint64_t> api_fs;
+    void api_fs_stats();
+
+    public:
+        NodeStats(const char *elasticsearchIP, const unsigned short elasticsearchPort)
+        {
+            const char *nodeIP;
+            hostname_ip(&nodeIP);
+            const std::string elastic_request = "GET /_nodes/" + std::string(nodeIP) + "/stats HTTP/1.0\r\n\r\n";
+            api_response = readResponse(elastic_request.c_str(), elasticsearchIP, elasticsearchPort);
+            if(api_response == NULL)
+                throw std::runtime_error("Failed to construct NodeStats object: NULL response");
+            if(getHttpStatus(api_response) != 200)
+                throw std::runtime_error("Failed to construct NodeStats object: HTTP code != 200");
+            api_response = remove_headers((char **)&api_response);
+        };
+        ~NodeStats(){free((char *)api_response);};
+
+        // hostname, IP called in constructor in order to initialize nodeIP
+        std::unordered_map<std::string, std::string> get_hostname_ip(){return address;};
+        // filesystem disk usage
+        std::unordered_map<std::string, uint64_t> get_fs_stats(){fs_stats();return fs;};
+        // swap usage
+        std::unordered_map<std::string, uint64_t> get_swap_stats(){swap_stats();return swap;};
+        // sshd, syslogd pid
+        std::unordered_map<std::string, std::string> get_processes_pid(){process_pid("sshd");process_pid("syslogd");return process;};
+        // number of zombie processes
+        std::unordered_map<std::string, uint64_t> get_zombie_count(){zombie_count();return zombie;};
+        // cpu stats
+        std::unordered_map<std::string, uint64_t> get_cpu_stats(){cpu_stats();return processor;};
+
+
+        // API stats
+        std::unordered_map<std::string, uint64_t> get_thread_pool_stats(){thread_pool_stats();return thread_pool;};
+        std::unordered_map<std::string, uint64_t> get_api_process_stats(){api_process_stats();return api_process;};
+        std::unordered_map<std::string, uint64_t> get_jvm_stats(){jvm_stats();return jvm;};
+        std::unordered_map<std::string, uint64_t> get_indices_stats(){indices_stats();return indices;};
+        std::unordered_map<std::string, uint64_t> get_api_fs_stats(){api_fs_stats();return api_fs;};
+};
+
+void NodeStats::thread_pool_stats()
 {
-    const std::string elastic_request = "GET /_nodes/" + std::string(nodeIP) + "/stats/thread_pool HTTP/1.0\r\n\r\n";
-    const char *response = readResponse(elastic_request.c_str(), elasticsearchIP, elasticsearchPort);
-    if(response == NULL) return response;
-    if(getHttpStatus(response) != 200) return response;
-    response = remove_headers((char **)&response);
-
     const char *thread_pool_ptr = NULL;
-    if((thread_pool_ptr = strstr(response, "thread_pool")) == NULL) return response;
+    if((thread_pool_ptr = strstr(api_response, "thread_pool\":")) == NULL) return;
 
     const char *ptr = NULL;
     const size_t rejected = strlen("rejected\":");
-    if((ptr = strstr(thread_pool_ptr, "bulk")) == NULL) return response;
-    if((ptr = strstr(ptr, "rejected\":")) == NULL) return response;
+    if((ptr = strstr(thread_pool_ptr, "bulk\":")) == NULL) return;
+    if((ptr = strstr(ptr, "rejected\":")) == NULL) return;
     ptr += rejected;
     uint64_t bulk_rejected = strtol(ptr, NULL, 0);
 
-    if((ptr = strstr(thread_pool_ptr, "index")) == NULL) return response;
-    if((ptr = strstr(ptr, "rejected\":")) == NULL) return response;
+    if((ptr = strstr(thread_pool_ptr, "index\":")) == NULL) return;
+    if((ptr = strstr(ptr, "rejected\":")) == NULL) return;
     ptr += rejected;
     uint64_t index_rejected = strtol(ptr, NULL, 0);
 
-    if((ptr = strstr(thread_pool_ptr, "search")) == NULL) return response;
-    if((ptr = strstr(ptr, "rejected\":")) == NULL) return response;
+    if((ptr = strstr(thread_pool_ptr, "search\":")) == NULL) return;
+    if((ptr = strstr(ptr, "rejected\":")) == NULL) return;
     ptr += rejected;
     uint64_t search_rejected = strtol(ptr, NULL, 0);
 
@@ -405,11 +410,164 @@ const char *NodeStats::thread_pool_stats()
     thread_pool.insert({"node_stats_thread_pool_bulk_rejected", bulk_rejected});
     thread_pool.insert({"node_stats_thread_pool_index_rejected", index_rejected});
     thread_pool.insert({"node_stats_thread_pool_search_rejected", search_rejected});
-
-    return response;
 }
 
-void NodeStats::hostname_ip()
+void NodeStats::api_process_stats()
+{
+    const char *process_ptr = NULL;
+    if((process_ptr = strstr(api_response, "process\":")) == NULL) return;
+
+    const char *ptr = NULL;
+    if((ptr = strstr(process_ptr, "open_file_descriptors\":")) == NULL) return;
+    ptr += strlen("open_file_descriptors\":");
+    uint64_t open_file_descriptors = strtol(ptr, NULL, 0);
+
+    if((ptr = strstr(process_ptr, "max_file_descriptors\":")) == NULL) return;
+    ptr += strlen("max_file_descriptors\":");
+    uint64_t max_file_descriptors = strtol(ptr, NULL, 0);
+
+    if((ptr = strstr(process_ptr, "percent\":")) == NULL) return;
+    ptr += strlen("percent\":");
+    uint64_t cpu_percent = strtol(ptr, NULL, 0);
+
+    api_process.insert({"node_stats_process_open_file_descriptors", open_file_descriptors});
+    api_process.insert({"node_stats_process_max_file_descriptors", max_file_descriptors});
+    api_process.insert({"node_stats_process_cpu_percent", cpu_percent});
+}
+
+void NodeStats::jvm_stats()
+{
+    const char *mem_ptr = NULL;
+    if((mem_ptr = strstr(api_response, "mem\":")) == NULL) return;
+
+    const char *ptr = NULL;
+    if((ptr = strstr(mem_ptr, "heap_used_in_bytes\":")) == NULL) return;
+    ptr += strlen("heap_used_in_bytes\":");
+    uint64_t heap_used_in_bytes = strtol(ptr, NULL, 0);
+
+    if((ptr = strstr(mem_ptr, "heap_used_percent\":")) == NULL) return;
+    ptr += strlen("heap_used_percent\":");
+    uint64_t heap_used_percent = strtol(ptr, NULL, 0);
+
+    const char *gc_ptr = NULL;
+    if((gc_ptr = strstr(api_response, "gc\":")) == NULL) return;
+
+    const char *gc_young_ptr = NULL;
+    if((gc_young_ptr = strstr(gc_ptr, "young\":")) == NULL) return;
+
+    if((ptr = strstr(gc_young_ptr, "collection_count\":")) == NULL) return;
+    ptr += strlen("collection_count\":");
+    uint64_t young_collection_count = strtol(ptr, NULL, 0);
+
+    if((ptr = strstr(gc_young_ptr, "collection_time_in_millis\":")) == NULL) return;
+    ptr += strlen("collection_time_in_millis\":");
+    uint64_t young_collection_time_in_millis = strtol(ptr, NULL, 0);
+
+    const char *gc_old_ptr = NULL;
+    if((gc_old_ptr = strstr(gc_ptr, "old\":")) == NULL) return;
+
+    if((ptr = strstr(gc_old_ptr, "collection_count\":")) == NULL) return;
+    ptr += strlen("collection_count\":");
+    uint64_t old_collection_count = strtol(ptr, NULL, 0);
+
+    if((ptr = strstr(gc_old_ptr, "collection_time_in_millis\":")) == NULL) return;
+    ptr += strlen("collection_time_in_millis\":");
+    uint64_t old_collection_time_in_millis = strtol(ptr, NULL, 0);
+
+    jvm.insert({"node_stats_jvm_mem_heap_used_in_bytes", heap_used_in_bytes});
+    jvm.insert({"node_stats_jvm_mem_heap_used_percent", heap_used_percent});
+    jvm.insert({"node_stats_jvm_gc_collectors_young_collection_count", young_collection_count});
+    jvm.insert({"node_stats_jvm_gc_collectors_young_collection_time_in_millis", young_collection_time_in_millis});
+    jvm.insert({"node_stats_jvm_gc_collectors_old_collection_count", old_collection_count});
+    jvm.insert({"node_stats_jvm_gc_collectors_old_collection_time_in_millis", old_collection_time_in_millis});
+}
+
+void NodeStats::indices_stats()
+{
+    const char *docs_ptr = NULL;
+    if((docs_ptr = strstr(api_response, "docs\":")) == NULL) return;
+    const char *store_ptr = NULL;
+    if((store_ptr = strstr(api_response, "store\":")) == NULL) return;
+    const char *indexing_ptr = NULL;
+    if((indexing_ptr = strstr(api_response, "indexing\":")) == NULL) return;
+    const char *search_ptr = NULL;
+    if((search_ptr = strstr(api_response, "search\":")) == NULL) return;
+    const char *segments_ptr = NULL;
+    if((segments_ptr = strstr(api_response, "segments\":")) == NULL) return;
+
+
+    const char *ptr = NULL;
+    if((ptr = strstr(docs_ptr, "count\":")) == NULL) return;
+    ptr += strlen("count\":");
+    uint64_t docs_count = strtol(ptr, NULL, 0);
+
+    if((ptr = strstr(store_ptr, "size_in_bytes\":")) == NULL) return;
+    ptr += strlen("size_in_bytes\":");
+    uint64_t store_size_in_bytes = strtol(ptr, NULL, 0);
+
+    if((ptr = strstr(store_ptr, "throttle_time_in_millis\":")) == NULL) return;
+    ptr += strlen("throttle_time_in_millis\":");
+    uint64_t store_throttle_time_in_millis = strtol(ptr, NULL, 0);
+
+    if((ptr = strstr(indexing_ptr, "index_total\":")) == NULL) return;
+    ptr += strlen("index_total\":");
+    uint64_t indexing_index_total = strtol(ptr, NULL, 0);
+
+    if((ptr = strstr(indexing_ptr, "index_time_in_millis\":")) == NULL) return;
+    ptr += strlen("index_time_in_millis\":");
+    uint64_t indexing_index_time_in_millis = strtol(ptr, NULL, 0);
+
+    if((ptr = strstr(indexing_ptr, "throttle_time_in_millis\":")) == NULL) return;
+    ptr += strlen("throttle_time_in_millis\":");
+    uint64_t indexing_throttle_time_in_millis = strtol(ptr, NULL, 0);
+
+    if((ptr = strstr(search_ptr, "query_total\":")) == NULL) return;
+    ptr += strlen("query_total\":");
+    uint64_t search_query_total = strtol(ptr, NULL, 0);
+
+    if((ptr = strstr(search_ptr, "query_time_in_millis\":")) == NULL) return;
+    ptr += strlen("query_time_in_millis\":");
+    uint64_t search_query_time_in_millis = strtol(ptr, NULL, 0);
+
+    if((ptr = strstr(segments_ptr, "count\":")) == NULL) return;
+    ptr += strlen("count\":");
+    uint64_t segments_count = strtol(ptr, NULL, 0);
+
+
+
+    indices.insert({"node_stats_indices_docs_count", docs_count});
+    indices.insert({"node_stats_indices_store_size_in_bytes", store_size_in_bytes});
+    indices.insert({"node_stats_indices_store_throttle_time_in_millis", store_throttle_time_in_millis});
+    indices.insert({"node_stats_indices_indexing_index_total", indexing_index_total});
+    indices.insert({"node_stats_indices_indexing_index_time_in_millis", indexing_index_time_in_millis});
+    indices.insert({"node_stats_indices_indexing_throttle_time_in_millis", indexing_throttle_time_in_millis});
+    indices.insert({"node_stats_indices_search_query_total", search_query_total});
+    indices.insert({"node_stats_indices_search_query_time_in_millis", search_query_time_in_millis});
+    indices.insert({"node_stats_indices_segments_count", segments_count});
+}
+
+void NodeStats::api_fs_stats()
+{
+    const char *fs_ptr = NULL;
+    if((fs_ptr = strstr(api_response, "fs\":")) == NULL) return;
+    const char *fs_total_ptr = NULL;
+    if((fs_total_ptr = strstr(fs_ptr, "total\":")) == NULL) return;
+
+    const char *ptr = NULL;
+    if((ptr = strstr(fs_total_ptr, "total_in_bytes\":")) == NULL) return;
+    ptr += strlen("total_in_bytes\":");
+    uint64_t total_in_bytes = strtol(ptr, NULL, 0);
+
+    if((ptr = strstr(fs_total_ptr, "free_in_bytes\":")) == NULL) return;
+    ptr += strlen("free_in_bytes\":");
+    uint64_t free_in_bytes = strtol(ptr, NULL, 0);
+
+
+    api_fs.insert({"node_stats_fs_total_in_bytes", total_in_bytes});
+    api_fs.insert({"node_stats_fs_free_in_bytes", free_in_bytes});
+}
+
+void NodeStats::hostname_ip(const char **nodeIP)
 {
     char hostname[HOST_NAME_MAX];
     if(gethostname(hostname, HOST_NAME_MAX) != 0)
@@ -431,7 +589,7 @@ void NodeStats::hostname_ip()
     snprintf(ip, sizeof(ip), "%s", inet_ntoa(s->sin_addr));
 	freeaddrinfo(info);
     address.insert({"source_node_ip", ip});
-    nodeIP = ip;
+    *nodeIP = ip;
 }
 
 void NodeStats::fs_stats()
@@ -610,7 +768,7 @@ int main()
         //{
             NodeStats stats("127.0.0.1", 9200);
             std::string json_output;
-            json_output = json_output + stats.get_thread_pool_stats();
+            json_output = json_output + stats.get_api_process_stats() + stats.get_thread_pool_stats() + stats.get_jvm_stats() + stats.get_indices_stats() + stats.get_api_fs_stats();
             //json_output = json_output + stats.get_docs_count();
             //json_output = json_output + stats.get_hostname_ip() + stats.get_fs_stats() +
             //            stats.get_swap_stats() + stats.get_processes_pid() + stats.get_zombie_count() +
