@@ -17,6 +17,8 @@
 #include <netdb.h>
 #include <sys/vfs.h> // get filesystem statistics
 
+#define IP_MAX 16
+
 /********************************/
 /********************************/
 /*** GENERIC HELPER FUNCTIONS ***/
@@ -303,56 +305,197 @@ template std::string &operator+(std::string &sum, const std::unordered_map<std::
 /***************************************/
 /***************************************/
 
+class Node
+{
+    int hostname_ip();
+    int master_node_ip();
 
-class NodeStats
+    protected:
+    std::string masterNodeIP;
+    std::string nodeIP;
+    std::string nodeHostname;
+    const char *elasticsearchIP;
+    unsigned short elasticsearchPort;
+    std::unordered_map<std::string, std::string> api_timestamp(const char *);
+
+    public:
+    Node()
+    {
+        elasticsearchIP = "127.0.0.1";
+        elasticsearchPort = 9200;
+        if(hostname_ip() == -1)
+            throw std::runtime_error("Failed to construct Node object: Hostname/IP unknown");
+        if(master_node_ip() == -1)
+            throw std::runtime_error("Failed to construct Node object: Unable to determine master node");
+    };
+};
+
+std::unordered_map<std::string, std::string> Node::api_timestamp(const char *response)
+{
+    std::unordered_map<std::string, std::string> timestamp;
+    const char *timestamp_ptr = NULL;
+    if((timestamp_ptr = strstr(response, "timestamp\":")) == NULL) return timestamp;
+    timestamp_ptr += strlen("timestamp\":");
+
+    // epoch is composed of 13 digits in elasticsearch, we only need 10
+    char time_buf[11];
+    snprintf(time_buf, sizeof(time_buf), "%s", timestamp_ptr);
+
+    char time_str[30];
+    struct tm *timeinfo;
+    time_t epoch = strtol(time_buf, NULL, 0);
+    timeinfo = gmtime(&epoch);
+    strftime(time_str, sizeof(time_str), "%Y-%m-%dT%H:%M:%SZ", timeinfo);
+    timestamp.insert({"@timestamp", time_str});
+
+    return timestamp;
+}
+
+int Node::master_node_ip()
+{
+    const char *elastic_request = "GET /_cat/master HTTP/1.0\r\n\r\n";
+    const char *response = readResponse(elastic_request, elasticsearchIP, elasticsearchPort);
+    if(response == NULL) return -1;
+    if(getHttpStatus(response) != 200) return -1;
+    response = remove_headers((char **)&response);
+
+    std::istringstream istream(response);
+    std::string tmp;
+    istream >> tmp >> tmp >> masterNodeIP;
+
+    free((char *)response);
+    return 0;
+}
+
+int Node::hostname_ip()
+{
+    char hostname[HOST_NAME_MAX];
+    if(gethostname(hostname, HOST_NAME_MAX) != 0)
+        return -1;
+    nodeHostname = hostname;
+
+	struct addrinfo hints, *info;
+	struct sockaddr_in *s;
+    char ip[IP_MAX];
+
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_INET;
+	hints.ai_socktype = SOCK_STREAM;
+
+	if(getaddrinfo(hostname, NULL, &hints, &info) != 0)
+		return -1;
+
+	s = (struct sockaddr_in *)info->ai_addr;
+    snprintf(ip, sizeof(ip), "%s", inet_ntoa(s->sin_addr));
+	freeaddrinfo(info);
+    nodeIP = ip;
+    return 0;
+}
+
+class ClusterStats : private Node
+{
+    const char *api_response;
+
+    std::unordered_map<std::string, uint64_t> api_indices_stats();
+
+    public:
+    ClusterStats()
+    {
+        if(nodeIP != masterNodeIP)
+            throw std::runtime_error("Failed to construct ClusterStats object: It is not a master node");
+
+        const char *elastic_request = "GET /_cluster/stats HTTP/1.0\r\n\r\n";
+        api_response = readResponse(elastic_request, elasticsearchIP, elasticsearchPort);
+        if(api_response == NULL)
+            throw std::runtime_error("Failed to construct ClusterStats object: NULL response");
+        if(getHttpStatus(api_response) != 200)
+            throw std::runtime_error("Failed to construct ClusterStats object: HTTP code != 200");
+        api_response = remove_headers((char **)&api_response);
+    };
+    ~ClusterStats(){free((char *)api_response);};
+
+    std::string get_stats()
+    {
+        std::string json_output;
+        json_output = json_output + api_timestamp(api_response) + api_indices_stats();
+
+        return json_output;
+    };
+};
+
+std::unordered_map<std::string, uint64_t> ClusterStats::api_indices_stats()
+{
+    std::unordered_map<std::string, uint64_t> indices;
+    const char *indices_ptr = NULL;
+    if((indices_ptr = strstr(api_response, "indices\":")) == NULL) return indices;
+
+    const char *ptr = NULL;
+    if((ptr = strstr(indices_ptr, "count\":")) == NULL) return indices;
+    ptr += strlen("count\":");
+    uint64_t indices_count = strtol(ptr, NULL, 0);
+    indices.insert({"cluster_stats_indices_count", indices_count});
+
+
+    const char *shards_ptr = NULL;
+    if((shards_ptr = strstr(indices_ptr, "shards\":")) == NULL) return indices;
+    if((ptr = strstr(shards_ptr, "total\":")) == NULL) return indices;
+    ptr += strlen("total\":");
+    uint64_t indices_shards_total = strtol(ptr, NULL, 0);
+    indices.insert({"cluster_stats_indices_shards_total", indices_shards_total});
+
+
+    const char *docs_ptr = NULL;
+    if((docs_ptr = strstr(indices_ptr, "docs\":")) == NULL) return indices;
+    if((ptr = strstr(docs_ptr, "count\":")) == NULL) return indices;
+    ptr += strlen("count\":");
+    uint64_t indices_docs_count = strtol(ptr, NULL, 0);
+    indices.insert({"cluster_stats_indices_docs_count", indices_docs_count});
+
+
+    const char *store_ptr = NULL;
+    if((store_ptr = strstr(indices_ptr, "store\":")) == NULL) return indices;
+    if((ptr = strstr(store_ptr, "size_in_bytes\":")) == NULL) return indices;
+    ptr += strlen("size_in_bytes\":");
+    uint64_t indices_store_size_in_bytes = strtol(ptr, NULL, 0);
+    indices.insert({"cluster_stats_indices_store_size_in_bytes", indices_store_size_in_bytes});
+
+    return indices;
+}
+
+class NodeStats : private Node
 {
     // OS
-    std::unordered_map<std::string, std::string> address;
-    void hostname_ip(const char **);
+    std::unordered_map<std::string, std::string> hostname_ip();
 
-    std::unordered_map<std::string, uint64_t> fs;
     // retrieve mountpoints from /etc/fstab excluding swap and print filesystem statistics
-    void fs_stats();
+    std::unordered_map<std::string, uint64_t> fs_stats();
 
-    std::unordered_map<std::string, uint64_t> swap;
-    void swap_stats();
+    std::unordered_map<std::string, uint64_t> swap_stats();
 
-    std::unordered_map<std::string, std::string> process;
-    void process_pid(const char *);
+    std::unordered_map<std::string, std::string> process_pid(const char *);
 
-    std::unordered_map<std::string, uint64_t> zombie;
-    void zombie_count();
+    std::unordered_map<std::string, uint64_t> zombie_count();
 
-    std::unordered_map<std::string, uint64_t> processor;
-    void cpu_stats();
-
-
+    std::unordered_map<std::string, uint64_t> cpu_stats();
 
 
     // API
     const char *api_response;
 
-    std::unordered_map<std::string, uint64_t> thread_pool;
-    void thread_pool_stats();
+    std::unordered_map<std::string, uint64_t> api_thread_pool_stats();
 
-    std::unordered_map<std::string, uint64_t> api_process;
-    void api_process_stats();
+    std::unordered_map<std::string, uint64_t> api_process_stats();
 
-    std::unordered_map<std::string, uint64_t> jvm;
-    void jvm_stats();
+    std::unordered_map<std::string, uint64_t> api_jvm_stats();
 
-    std::unordered_map<std::string, uint64_t> indices;
-    void indices_stats();
+    std::unordered_map<std::string, uint64_t> api_indices_stats();
 
-    std::unordered_map<std::string, uint64_t> api_fs;
-    void api_fs_stats();
+    std::unordered_map<std::string, uint64_t> api_fs_stats();
 
     public:
-        NodeStats(const char *elasticsearchIP, const unsigned short elasticsearchPort)
+        NodeStats()
         {
-            const char *nodeIP;
-            hostname_ip(&nodeIP);
-            const std::string elastic_request = "GET /_nodes/" + std::string(nodeIP) + "/stats HTTP/1.0\r\n\r\n";
+            const std::string elastic_request = "GET /_nodes/" + nodeIP + "/stats HTTP/1.0\r\n\r\n";
             api_response = readResponse(elastic_request.c_str(), elasticsearchIP, elasticsearchPort);
             if(api_response == NULL)
                 throw std::runtime_error("Failed to construct NodeStats object: NULL response");
@@ -362,241 +505,246 @@ class NodeStats
         };
         ~NodeStats(){free((char *)api_response);};
 
-        // hostname, IP called in constructor in order to initialize nodeIP
-        std::unordered_map<std::string, std::string> get_hostname_ip(){return address;};
-        // filesystem disk usage
-        std::unordered_map<std::string, uint64_t> get_fs_stats(){fs_stats();return fs;};
-        // swap usage
-        std::unordered_map<std::string, uint64_t> get_swap_stats(){swap_stats();return swap;};
-        // sshd, syslogd pid
-        std::unordered_map<std::string, std::string> get_processes_pid(){process_pid("sshd");process_pid("syslogd");return process;};
-        // number of zombie processes
-        std::unordered_map<std::string, uint64_t> get_zombie_count(){zombie_count();return zombie;};
-        // cpu stats
-        std::unordered_map<std::string, uint64_t> get_cpu_stats(){cpu_stats();return processor;};
+        std::string get_stats()
+        {
+            std::string json_output;
+            json_output = json_output + api_timestamp(api_response) +
+                                        hostname_ip() + fs_stats() + swap_stats() +
+                                        process_pid("sshd") + process_pid("syslogd") +
+                                        zombie_count() + cpu_stats() +
+                                        api_thread_pool_stats() + api_process_stats() + api_jvm_stats() +
+                                        api_indices_stats() + api_fs_stats();
 
-
-        // API stats
-        std::unordered_map<std::string, uint64_t> get_thread_pool_stats(){thread_pool_stats();return thread_pool;};
-        std::unordered_map<std::string, uint64_t> get_api_process_stats(){api_process_stats();return api_process;};
-        std::unordered_map<std::string, uint64_t> get_jvm_stats(){jvm_stats();return jvm;};
-        std::unordered_map<std::string, uint64_t> get_indices_stats(){indices_stats();return indices;};
-        std::unordered_map<std::string, uint64_t> get_api_fs_stats(){api_fs_stats();return api_fs;};
+            return json_output;
+        };
 };
 
-void NodeStats::thread_pool_stats()
+std::unordered_map<std::string, std::string> NodeStats::hostname_ip()
 {
+    std::unordered_map<std::string, std::string> address;
+    address.insert({"source_node_host", nodeHostname});
+    address.insert({"source_node_ip", nodeIP});
+    return address;
+}
+
+std::unordered_map<std::string, uint64_t> NodeStats::api_thread_pool_stats()
+{
+    std::unordered_map<std::string, uint64_t> thread_pool;
     const char *thread_pool_ptr = NULL;
-    if((thread_pool_ptr = strstr(api_response, "thread_pool\":")) == NULL) return;
+    if((thread_pool_ptr = strstr(api_response, "thread_pool\":")) == NULL) return thread_pool;
 
     const char *ptr = NULL;
     const size_t rejected = strlen("rejected\":");
-    if((ptr = strstr(thread_pool_ptr, "bulk\":")) == NULL) return;
-    if((ptr = strstr(ptr, "rejected\":")) == NULL) return;
+    if((ptr = strstr(thread_pool_ptr, "bulk\":")) == NULL) return thread_pool;
+    if((ptr = strstr(ptr, "rejected\":")) == NULL) return thread_pool;
     ptr += rejected;
     uint64_t bulk_rejected = strtol(ptr, NULL, 0);
+    thread_pool.insert({"node_stats_thread_pool_bulk_rejected", bulk_rejected});
 
-    if((ptr = strstr(thread_pool_ptr, "index\":")) == NULL) return;
-    if((ptr = strstr(ptr, "rejected\":")) == NULL) return;
+
+    if((ptr = strstr(thread_pool_ptr, "index\":")) == NULL) return thread_pool;
+    if((ptr = strstr(ptr, "rejected\":")) == NULL) return thread_pool;
     ptr += rejected;
     uint64_t index_rejected = strtol(ptr, NULL, 0);
+    thread_pool.insert({"node_stats_thread_pool_index_rejected", index_rejected});
 
-    if((ptr = strstr(thread_pool_ptr, "search\":")) == NULL) return;
-    if((ptr = strstr(ptr, "rejected\":")) == NULL) return;
+
+    if((ptr = strstr(thread_pool_ptr, "search\":")) == NULL) return thread_pool;
+    if((ptr = strstr(ptr, "rejected\":")) == NULL) return thread_pool;
     ptr += rejected;
     uint64_t search_rejected = strtol(ptr, NULL, 0);
-
-
-    thread_pool.insert({"node_stats_thread_pool_bulk_rejected", bulk_rejected});
-    thread_pool.insert({"node_stats_thread_pool_index_rejected", index_rejected});
     thread_pool.insert({"node_stats_thread_pool_search_rejected", search_rejected});
+
+
+    return thread_pool;
 }
 
-void NodeStats::api_process_stats()
+std::unordered_map<std::string, uint64_t> NodeStats::api_process_stats()
 {
+    std::unordered_map<std::string, uint64_t> api_process;
     const char *process_ptr = NULL;
-    if((process_ptr = strstr(api_response, "process\":")) == NULL) return;
+    if((process_ptr = strstr(api_response, "process\":")) == NULL) return api_process;
 
     const char *ptr = NULL;
-    if((ptr = strstr(process_ptr, "open_file_descriptors\":")) == NULL) return;
+    if((ptr = strstr(process_ptr, "open_file_descriptors\":")) == NULL) return api_process;
     ptr += strlen("open_file_descriptors\":");
     uint64_t open_file_descriptors = strtol(ptr, NULL, 0);
+    api_process.insert({"node_stats_process_open_file_descriptors", open_file_descriptors});
 
-    if((ptr = strstr(process_ptr, "max_file_descriptors\":")) == NULL) return;
+
+    if((ptr = strstr(process_ptr, "max_file_descriptors\":")) == NULL) return api_process;
     ptr += strlen("max_file_descriptors\":");
     uint64_t max_file_descriptors = strtol(ptr, NULL, 0);
+    api_process.insert({"node_stats_process_max_file_descriptors", max_file_descriptors});
 
-    if((ptr = strstr(process_ptr, "percent\":")) == NULL) return;
+
+    if((ptr = strstr(process_ptr, "percent\":")) == NULL) return api_process;
     ptr += strlen("percent\":");
     uint64_t cpu_percent = strtol(ptr, NULL, 0);
-
-    api_process.insert({"node_stats_process_open_file_descriptors", open_file_descriptors});
-    api_process.insert({"node_stats_process_max_file_descriptors", max_file_descriptors});
     api_process.insert({"node_stats_process_cpu_percent", cpu_percent});
+
+
+    return api_process;
 }
 
-void NodeStats::jvm_stats()
+std::unordered_map<std::string, uint64_t> NodeStats::api_jvm_stats()
 {
+    std::unordered_map<std::string, uint64_t> jvm;
     const char *mem_ptr = NULL;
-    if((mem_ptr = strstr(api_response, "mem\":")) == NULL) return;
+    if((mem_ptr = strstr(api_response, "mem\":")) == NULL) return jvm;
 
     const char *ptr = NULL;
-    if((ptr = strstr(mem_ptr, "heap_used_in_bytes\":")) == NULL) return;
+    if((ptr = strstr(mem_ptr, "heap_used_in_bytes\":")) == NULL) return jvm;
     ptr += strlen("heap_used_in_bytes\":");
     uint64_t heap_used_in_bytes = strtol(ptr, NULL, 0);
+    jvm.insert({"node_stats_jvm_mem_heap_used_in_bytes", heap_used_in_bytes});
 
-    if((ptr = strstr(mem_ptr, "heap_used_percent\":")) == NULL) return;
+
+    if((ptr = strstr(mem_ptr, "heap_used_percent\":")) == NULL) return jvm;
     ptr += strlen("heap_used_percent\":");
     uint64_t heap_used_percent = strtol(ptr, NULL, 0);
+    jvm.insert({"node_stats_jvm_mem_heap_used_percent", heap_used_percent});
+
 
     const char *gc_ptr = NULL;
-    if((gc_ptr = strstr(api_response, "gc\":")) == NULL) return;
+    if((gc_ptr = strstr(api_response, "gc\":")) == NULL) return jvm;
 
     const char *gc_young_ptr = NULL;
-    if((gc_young_ptr = strstr(gc_ptr, "young\":")) == NULL) return;
+    if((gc_young_ptr = strstr(gc_ptr, "young\":")) == NULL) return jvm;
 
-    if((ptr = strstr(gc_young_ptr, "collection_count\":")) == NULL) return;
+    if((ptr = strstr(gc_young_ptr, "collection_count\":")) == NULL) return jvm;
     ptr += strlen("collection_count\":");
     uint64_t young_collection_count = strtol(ptr, NULL, 0);
+    jvm.insert({"node_stats_jvm_gc_collectors_young_collection_count", young_collection_count});
 
-    if((ptr = strstr(gc_young_ptr, "collection_time_in_millis\":")) == NULL) return;
+
+    if((ptr = strstr(gc_young_ptr, "collection_time_in_millis\":")) == NULL) return jvm;
     ptr += strlen("collection_time_in_millis\":");
     uint64_t young_collection_time_in_millis = strtol(ptr, NULL, 0);
+    jvm.insert({"node_stats_jvm_gc_collectors_young_collection_time_in_millis", young_collection_time_in_millis});
+
 
     const char *gc_old_ptr = NULL;
-    if((gc_old_ptr = strstr(gc_ptr, "old\":")) == NULL) return;
+    if((gc_old_ptr = strstr(gc_ptr, "old\":")) == NULL) return jvm;
 
-    if((ptr = strstr(gc_old_ptr, "collection_count\":")) == NULL) return;
+    if((ptr = strstr(gc_old_ptr, "collection_count\":")) == NULL) return jvm;
     ptr += strlen("collection_count\":");
     uint64_t old_collection_count = strtol(ptr, NULL, 0);
+    jvm.insert({"node_stats_jvm_gc_collectors_old_collection_count", old_collection_count});
 
-    if((ptr = strstr(gc_old_ptr, "collection_time_in_millis\":")) == NULL) return;
+
+    if((ptr = strstr(gc_old_ptr, "collection_time_in_millis\":")) == NULL) return jvm;
     ptr += strlen("collection_time_in_millis\":");
     uint64_t old_collection_time_in_millis = strtol(ptr, NULL, 0);
-
-    jvm.insert({"node_stats_jvm_mem_heap_used_in_bytes", heap_used_in_bytes});
-    jvm.insert({"node_stats_jvm_mem_heap_used_percent", heap_used_percent});
-    jvm.insert({"node_stats_jvm_gc_collectors_young_collection_count", young_collection_count});
-    jvm.insert({"node_stats_jvm_gc_collectors_young_collection_time_in_millis", young_collection_time_in_millis});
-    jvm.insert({"node_stats_jvm_gc_collectors_old_collection_count", old_collection_count});
     jvm.insert({"node_stats_jvm_gc_collectors_old_collection_time_in_millis", old_collection_time_in_millis});
+
+
+    return jvm;
 }
 
-void NodeStats::indices_stats()
+std::unordered_map<std::string, uint64_t> NodeStats::api_indices_stats()
 {
+    std::unordered_map<std::string, uint64_t> indices;
     const char *docs_ptr = NULL;
-    if((docs_ptr = strstr(api_response, "docs\":")) == NULL) return;
+    if((docs_ptr = strstr(api_response, "docs\":")) == NULL) return indices;
     const char *store_ptr = NULL;
-    if((store_ptr = strstr(api_response, "store\":")) == NULL) return;
+    if((store_ptr = strstr(api_response, "store\":")) == NULL) return indices;
     const char *indexing_ptr = NULL;
-    if((indexing_ptr = strstr(api_response, "indexing\":")) == NULL) return;
+    if((indexing_ptr = strstr(api_response, "indexing\":")) == NULL) return indices;
     const char *search_ptr = NULL;
-    if((search_ptr = strstr(api_response, "search\":")) == NULL) return;
+    if((search_ptr = strstr(api_response, "search\":")) == NULL) return indices;
     const char *segments_ptr = NULL;
-    if((segments_ptr = strstr(api_response, "segments\":")) == NULL) return;
+    if((segments_ptr = strstr(api_response, "segments\":")) == NULL) return indices;
 
 
     const char *ptr = NULL;
-    if((ptr = strstr(docs_ptr, "count\":")) == NULL) return;
+    if((ptr = strstr(docs_ptr, "count\":")) == NULL) return indices;
     ptr += strlen("count\":");
     uint64_t docs_count = strtol(ptr, NULL, 0);
+    indices.insert({"node_stats_indices_docs_count", docs_count});
 
-    if((ptr = strstr(store_ptr, "size_in_bytes\":")) == NULL) return;
+
+    if((ptr = strstr(store_ptr, "size_in_bytes\":")) == NULL) return indices;
     ptr += strlen("size_in_bytes\":");
     uint64_t store_size_in_bytes = strtol(ptr, NULL, 0);
+    indices.insert({"node_stats_indices_store_size_in_bytes", store_size_in_bytes});
 
-    if((ptr = strstr(store_ptr, "throttle_time_in_millis\":")) == NULL) return;
+
+    if((ptr = strstr(store_ptr, "throttle_time_in_millis\":")) == NULL) return indices;
     ptr += strlen("throttle_time_in_millis\":");
     uint64_t store_throttle_time_in_millis = strtol(ptr, NULL, 0);
+    indices.insert({"node_stats_indices_store_throttle_time_in_millis", store_throttle_time_in_millis});
 
-    if((ptr = strstr(indexing_ptr, "index_total\":")) == NULL) return;
+
+    if((ptr = strstr(indexing_ptr, "index_total\":")) == NULL) return indices;
     ptr += strlen("index_total\":");
     uint64_t indexing_index_total = strtol(ptr, NULL, 0);
+    indices.insert({"node_stats_indices_indexing_index_total", indexing_index_total});
 
-    if((ptr = strstr(indexing_ptr, "index_time_in_millis\":")) == NULL) return;
+
+    if((ptr = strstr(indexing_ptr, "index_time_in_millis\":")) == NULL) return indices;
     ptr += strlen("index_time_in_millis\":");
     uint64_t indexing_index_time_in_millis = strtol(ptr, NULL, 0);
+    indices.insert({"node_stats_indices_indexing_index_time_in_millis", indexing_index_time_in_millis});
 
-    if((ptr = strstr(indexing_ptr, "throttle_time_in_millis\":")) == NULL) return;
+
+    if((ptr = strstr(indexing_ptr, "throttle_time_in_millis\":")) == NULL) return indices;
     ptr += strlen("throttle_time_in_millis\":");
     uint64_t indexing_throttle_time_in_millis = strtol(ptr, NULL, 0);
+    indices.insert({"node_stats_indices_indexing_throttle_time_in_millis", indexing_throttle_time_in_millis});
 
-    if((ptr = strstr(search_ptr, "query_total\":")) == NULL) return;
+
+    if((ptr = strstr(search_ptr, "query_total\":")) == NULL) return indices;
     ptr += strlen("query_total\":");
     uint64_t search_query_total = strtol(ptr, NULL, 0);
+    indices.insert({"node_stats_indices_search_query_total", search_query_total});
 
-    if((ptr = strstr(search_ptr, "query_time_in_millis\":")) == NULL) return;
+
+    if((ptr = strstr(search_ptr, "query_time_in_millis\":")) == NULL) return indices;
     ptr += strlen("query_time_in_millis\":");
     uint64_t search_query_time_in_millis = strtol(ptr, NULL, 0);
+    indices.insert({"node_stats_indices_search_query_time_in_millis", search_query_time_in_millis});
 
-    if((ptr = strstr(segments_ptr, "count\":")) == NULL) return;
+
+    if((ptr = strstr(segments_ptr, "count\":")) == NULL) return indices;
     ptr += strlen("count\":");
     uint64_t segments_count = strtol(ptr, NULL, 0);
-
-
-
-    indices.insert({"node_stats_indices_docs_count", docs_count});
-    indices.insert({"node_stats_indices_store_size_in_bytes", store_size_in_bytes});
-    indices.insert({"node_stats_indices_store_throttle_time_in_millis", store_throttle_time_in_millis});
-    indices.insert({"node_stats_indices_indexing_index_total", indexing_index_total});
-    indices.insert({"node_stats_indices_indexing_index_time_in_millis", indexing_index_time_in_millis});
-    indices.insert({"node_stats_indices_indexing_throttle_time_in_millis", indexing_throttle_time_in_millis});
-    indices.insert({"node_stats_indices_search_query_total", search_query_total});
-    indices.insert({"node_stats_indices_search_query_time_in_millis", search_query_time_in_millis});
     indices.insert({"node_stats_indices_segments_count", segments_count});
+
+
+    return indices;
 }
 
-void NodeStats::api_fs_stats()
+std::unordered_map<std::string, uint64_t> NodeStats::api_fs_stats()
 {
+    std::unordered_map<std::string, uint64_t> api_fs;
     const char *fs_ptr = NULL;
-    if((fs_ptr = strstr(api_response, "fs\":")) == NULL) return;
+    if((fs_ptr = strstr(api_response, "fs\":")) == NULL) return api_fs;
     const char *fs_total_ptr = NULL;
-    if((fs_total_ptr = strstr(fs_ptr, "total\":")) == NULL) return;
+    if((fs_total_ptr = strstr(fs_ptr, "total\":")) == NULL) return api_fs;
 
     const char *ptr = NULL;
-    if((ptr = strstr(fs_total_ptr, "total_in_bytes\":")) == NULL) return;
+    if((ptr = strstr(fs_total_ptr, "total_in_bytes\":")) == NULL) return api_fs;
     ptr += strlen("total_in_bytes\":");
     uint64_t total_in_bytes = strtol(ptr, NULL, 0);
+    api_fs.insert({"node_stats_fs_total_in_bytes", total_in_bytes});
 
-    if((ptr = strstr(fs_total_ptr, "free_in_bytes\":")) == NULL) return;
+
+    if((ptr = strstr(fs_total_ptr, "free_in_bytes\":")) == NULL) return api_fs;
     ptr += strlen("free_in_bytes\":");
     uint64_t free_in_bytes = strtol(ptr, NULL, 0);
-
-
-    api_fs.insert({"node_stats_fs_total_in_bytes", total_in_bytes});
     api_fs.insert({"node_stats_fs_free_in_bytes", free_in_bytes});
+
+
+    return api_fs;
 }
 
-void NodeStats::hostname_ip(const char **nodeIP)
+std::unordered_map<std::string, uint64_t> NodeStats::fs_stats()
 {
-    char hostname[HOST_NAME_MAX];
-    if(gethostname(hostname, HOST_NAME_MAX) != 0)
-        return;
-    address.insert({"source_node_host", hostname});
-
-	struct addrinfo hints, *info;
-	struct sockaddr_in *s;
-    static char ip[16];
-
-	memset(&hints, 0, sizeof(hints));
-	hints.ai_family = AF_INET;
-	hints.ai_socktype = SOCK_STREAM;
-
-	if(getaddrinfo(hostname, NULL, &hints, &info) != 0)
-		return;
-
-	s = (struct sockaddr_in *)info->ai_addr;
-    snprintf(ip, sizeof(ip), "%s", inet_ntoa(s->sin_addr));
-	freeaddrinfo(info);
-    address.insert({"source_node_ip", ip});
-    *nodeIP = ip;
-}
-
-void NodeStats::fs_stats()
-{
+    std::unordered_map<std::string, uint64_t> fs;
     FILE* file = NULL;
     if((file = fopen("/etc/fstab", "r")) == NULL)
-        return;
+        return fs;
 
     struct mntent* fstab;
     struct statfs buf;
@@ -631,15 +779,17 @@ void NodeStats::fs_stats()
     endmntent(file);
     // on CentOS7 double free error
     //fclose(file);
+    return fs;
 }
 
-void NodeStats::swap_stats()
+std::unordered_map<std::string, uint64_t> NodeStats::swap_stats()
 {
+    std::unordered_map<std::string, uint64_t> swap;
     std::ifstream ifs("/proc/swaps");
     std::string line;
     // store the first line after header
     std::getline(ifs, line);
-    if(!std::getline(ifs, line)) return;
+    if(!std::getline(ifs, line)) return swap;
 
     std::istringstream iss(line);
     std::string tmp;
@@ -652,10 +802,12 @@ void NodeStats::swap_stats()
     swap.insert({"node_stats_swap_space_used_in_kilobytes", swap_used});
 
     ifs.close();
+    return swap;
 }
 
-void NodeStats::process_pid(const char *name)
+std::unordered_map<std::string, std::string> NodeStats::process_pid(const char *name)
 {
+    std::unordered_map<std::string, std::string> process;
     DIR *dir;
     std::ifstream cmdline;
     std::string line;
@@ -663,7 +815,7 @@ void NodeStats::process_pid(const char *name)
     std::string pid_str = "node_stats_" + std::string(name) + "_pid";
     char filename[300];
     struct dirent *ent;
-    if((dir = opendir("/proc")) == NULL) return;
+    if((dir = opendir("/proc")) == NULL) return process;
 
     while((ent = readdir(dir)) != NULL)
     {
@@ -687,10 +839,12 @@ void NodeStats::process_pid(const char *name)
     }
 
     closedir(dir);
+    return process;
 }
 
-void NodeStats::zombie_count()
+std::unordered_map<std::string, uint64_t> NodeStats::zombie_count()
 {
+    std::unordered_map<std::string, uint64_t> zombie;
     DIR *dir;
     std::ifstream stat;
     std::string line;
@@ -699,7 +853,7 @@ void NodeStats::zombie_count()
     std::string tmp, third_field;
     char filename[300];
     struct dirent *ent;
-    if((dir = opendir("/proc")) == NULL) return;
+    if((dir = opendir("/proc")) == NULL) return zombie;
 
     while((ent = readdir(dir)) != NULL)
     {
@@ -723,10 +877,12 @@ void NodeStats::zombie_count()
 
     zombie.insert({"node_stats_zombie_processes_count", count});
     closedir(dir);
+    return zombie;
 }
 
-void NodeStats::cpu_stats()
+std::unordered_map<std::string, uint64_t> NodeStats::cpu_stats()
 {
+    std::unordered_map<std::string, uint64_t> processor;
     std::string line;
     std::ifstream stat;
     uint64_t idle_time[2];
@@ -737,7 +893,7 @@ void NodeStats::cpu_stats()
     for(int i = 0; i < 2; i++)
     {
         stat.open("/proc/stat");
-        if(!std::getline(stat, line)) return;
+        if(!std::getline(stat, line)) return processor;
         stat.close();
 
         std::istringstream istream(line);
@@ -757,6 +913,7 @@ void NodeStats::cpu_stats()
     uint64_t iowait_percent = 100 * (iowait_time[1] - iowait_time[0]) / (total_time[1] - total_time[0]);
     processor.insert({"node_stats_cpu_busy_percent", busy_time_percent});
     processor.insert({"node_stats_cpu_iowait_percent", iowait_percent});
+    return processor;
 }
 
 int main()
@@ -766,19 +923,33 @@ int main()
     //{
         //for(;;)
         //{
-            NodeStats stats("127.0.0.1", 9200);
-            std::string json_output;
-            json_output = json_output + stats.get_api_process_stats() + stats.get_thread_pool_stats() + stats.get_jvm_stats() + stats.get_indices_stats() + stats.get_api_fs_stats();
-            //json_output = json_output + stats.get_docs_count();
-            //json_output = json_output + stats.get_hostname_ip() + stats.get_fs_stats() +
-            //            stats.get_swap_stats() + stats.get_processes_pid() + stats.get_zombie_count() +
-            //            stats.get_cpu_stats();
+            // Nodes stats
+            try
+            {
+                NodeStats node;
 
-            std::cout << json_output << std::endl;
-            //sendData(json_output.c_str(), "127.0.0.1", 6106);
-            //sendDataToElasticsearch(json_output, "marvel_new", "127.0.0.1", 9200);
+                std::cout << node.get_stats() << std::endl;
+                //sendData(json_output.c_str(), "127.0.0.1", 6106);
+                //sendDataToElasticsearch(json_output, "marvel_new", "127.0.0.1", 9200);
 
-            //std::cout << stats.get_cpu_stats() << std::endl;
+                //std::cout << stats.get_cpu_stats() << std::endl;
+            }
+            catch(const std::runtime_error &error)
+            {
+                std::cerr << error.what() << std::endl;
+            }
+
+            // Cluster stats
+            try
+            {
+                ClusterStats cluster;
+
+                std::cout << cluster.get_stats() << std::endl;
+            }
+            catch(const std::runtime_error &error)
+            {
+                std::cerr << error.what() << std::endl;
+            }
             //sleep(60);
         //}
     //}
