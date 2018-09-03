@@ -15,9 +15,28 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
-#include <sys/vfs.h> // get filesystem statistics
+#include <sys/vfs.h>
 
 #define IP_MAX 16
+
+/*** OS METRICS USING LINUX/POSIX LIBRARIES ***/
+// returns associative array with hostname and ip address of this machine
+std::unordered_map<std::string, std::string> hostname_ip();
+
+// retrieves mountpoints from /etc/fstab excluding swap and returns associative array with filesystem statistics
+std::unordered_map<std::string, uint64_t> fs_stats();
+
+// returns associative array with swap usage
+std::unordered_map<std::string, uint64_t> swap_stats();
+
+// returns associative array with pid of the process given in the argument
+std::unordered_map<std::string, std::string> process_pid(const char *);
+
+// returns associative array with the number of zombie processes
+std::unordered_map<std::string, uint64_t> zombie_count();
+
+// returns associative array with cpu percentage when in busy,iowait state in 1s interval
+std::unordered_map<std::string, uint64_t> cpu_stats();
 
 /********************************/
 /********************************/
@@ -213,6 +232,7 @@ int sendDataToElasticsearch(const std::string &data, const char *index, const ch
 
     std::string elastic_request = "POST /" + std::string(index) + "/" + std::string(index) + " HTTP/1.0\r\n" +
 	"Content-type: application/json\r\n" +
+    "Authorization: Basic bG9nc2VydmVyOmxvZ3NlcnZlcg==\r\n" +
 	"Content-length: " + std::to_string(elastic_data.size()) + "\r\n\r\n" +
 	elastic_data;
 
@@ -305,6 +325,11 @@ template std::string &operator+(std::string &sum, const std::unordered_map<std::
 /***************************************/
 /***************************************/
 
+
+/***************************************/
+/***************************************/
+/*********** NODE BASE CLASS ***********/
+// methods common for both node and cluster stats
 class Node
 {
     int hostname_ip();
@@ -317,6 +342,7 @@ class Node
     const char *elasticsearchIP;
     unsigned short elasticsearchPort;
     std::unordered_map<std::string, std::string> api_timestamp(const char *);
+    const char *extract_json_value(const char *, const char **, int);
 
     public:
     Node()
@@ -328,7 +354,22 @@ class Node
         if(master_node_ip() == -1)
             throw std::runtime_error("Failed to construct Node object: Unable to determine master node");
     };
+    std::string getNodeIP() const{return nodeIP;};
+    std::string getNodeHostname() const{return nodeHostname;};
 };
+
+const char *Node::extract_json_value(const char *response, const char **json_key, int levels)
+{
+    const char *value;
+    int index = 1;
+    if((value = strstr(response, json_key[0])) == NULL) return NULL;
+    for(; index < levels; index++)
+    {
+        if((value = strstr(value, json_key[index])) == NULL) return NULL;
+    }
+    value += strlen(json_key[index - 1]);
+    return value;
+}
 
 std::unordered_map<std::string, std::string> Node::api_timestamp(const char *response)
 {
@@ -346,7 +387,7 @@ std::unordered_map<std::string, std::string> Node::api_timestamp(const char *res
     time_t epoch = strtol(time_buf, NULL, 0);
     timeinfo = gmtime(&epoch);
     strftime(time_str, sizeof(time_str), "%Y-%m-%dT%H:%M:%SZ", timeinfo);
-    timestamp.insert({"@timestamp", time_str});
+    timestamp.insert({"timestamp_api", time_str});
 
     return timestamp;
 }
@@ -391,12 +432,19 @@ int Node::hostname_ip()
     nodeIP = ip;
     return 0;
 }
+/******* END OF NODE BASE CLASS *******/
+/**************************************/
+/**************************************/
 
+
+/**************************************/
+/**************************************/
+/********* CLUSTER API CLASS **********/
 class ClusterStats : private Node
 {
     const char *api_response;
 
-    std::unordered_map<std::string, uint64_t> api_indices_stats();
+    std::unordered_map<std::string, uint64_t> api_stats();
 
     public:
     ClusterStats()
@@ -408,89 +456,284 @@ class ClusterStats : private Node
         api_response = readResponse(elastic_request, elasticsearchIP, elasticsearchPort);
         if(api_response == NULL)
             throw std::runtime_error("Failed to construct ClusterStats object: NULL response");
-        if(getHttpStatus(api_response) != 200)
-            throw std::runtime_error("Failed to construct ClusterStats object: HTTP code != 200");
-        api_response = remove_headers((char **)&api_response);
     };
     ~ClusterStats(){free((char *)api_response);};
 
-    std::string get_stats()
+    std::string get_api_stats()
     {
         std::string json_output;
-        json_output = json_output + api_timestamp(api_response) + api_indices_stats();
+        json_output = json_output + api_timestamp(api_response) + api_stats();
 
         return json_output;
     };
 };
 
-std::unordered_map<std::string, uint64_t> ClusterStats::api_indices_stats()
+std::unordered_map<std::string, uint64_t> ClusterStats::api_stats()
 {
-    std::unordered_map<std::string, uint64_t> indices;
-    const char *indices_ptr = NULL;
-    if((indices_ptr = strstr(api_response, "indices\":")) == NULL) return indices;
+    std::unordered_map<std::string, uint64_t> stats;
+    if(getHttpStatus(api_response) != 200) return stats;
+    api_response = remove_headers((char **)&api_response);
+    const char *value = NULL;
 
-    const char *ptr = NULL;
-    if((ptr = strstr(indices_ptr, "count\":")) == NULL) return indices;
-    ptr += strlen("count\":");
-    uint64_t indices_count = strtol(ptr, NULL, 0);
-    indices.insert({"cluster_stats_indices_count", indices_count});
+    const char *ptr[] = {"nodes\":", "count\":", "total\":"};
+    if((value = extract_json_value(api_response, ptr, 3)) == NULL) return stats;
+    uint64_t nodes_count_total = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_nodes_count_total", nodes_count_total});
+
+    const char *ptr2[] = {"nodes\":", "os\":", "mem\":", "total_in_bytes\":"};
+    if((value = extract_json_value(api_response, ptr2, 4)) == NULL) return stats;
+    uint64_t nodes_os_mem_total_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_nodes_os_mem_total_in_bytes", nodes_os_mem_total_in_bytes});
+
+    const char *ptr3[] = {"nodes\":", "jvm\":", "mem\":", "heap_used_in_bytes\":"};
+    if((value = extract_json_value(api_response, ptr3, 4)) == NULL) return stats;
+    uint64_t nodes_jvm_mem_heap_used_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_nodes_jvm_mem_heap_used_in_bytes", nodes_jvm_mem_heap_used_in_bytes});
+
+    const char *ptr4[] = {"nodes\":", "jvm\":", "mem\":", "heap_max_in_bytes\":"};
+    if((value = extract_json_value(api_response, ptr4, 4)) == NULL) return stats;
+    uint64_t nodes_jvm_mem_heap_max_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_nodes_jvm_mem_heap_max_in_bytes", nodes_jvm_mem_heap_max_in_bytes});
 
 
-    const char *shards_ptr = NULL;
-    if((shards_ptr = strstr(indices_ptr, "shards\":")) == NULL) return indices;
-    if((ptr = strstr(shards_ptr, "total\":")) == NULL) return indices;
-    ptr += strlen("total\":");
-    uint64_t indices_shards_total = strtol(ptr, NULL, 0);
-    indices.insert({"cluster_stats_indices_shards_total", indices_shards_total});
+    const char *ptr5[] = {"indices\":", "count\":"};
+    if((value = extract_json_value(api_response, ptr5, 2)) == NULL) return stats;
+    uint64_t indices_count = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_count", indices_count});
+
+    const char *ptr6[] = {"indices\":", "shards\":", "total\":"};
+    if((value = extract_json_value(api_response, ptr6, 3)) == NULL) return stats;
+    uint64_t indices_shards_total = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_shards_total", indices_shards_total});
+
+    const char *ptr7[] = {"indices\":", "shards\":", "index\":", "shards\":", "min\":"};
+    if((value = extract_json_value(api_response, ptr7, 5)) == NULL) return stats;
+    uint64_t indices_shards_index_shards_min = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_shards_index_shards_min", indices_shards_index_shards_min});
+
+    const char *ptr8[] = {"indices\":", "shards\":", "index\":", "shards\":", "max\":"};
+    if((value = extract_json_value(api_response, ptr8, 5)) == NULL) return stats;
+    uint64_t indices_shards_index_shards_max = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_shards_index_shards_max", indices_shards_index_shards_max});
+
+    const char *ptr9[] = {"indices\":", "shards\":", "index\":", "primaries\":", "min\":"};
+    if((value = extract_json_value(api_response, ptr9, 5)) == NULL) return stats;
+    uint64_t indices_shards_index_primaries_min = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_shards_index_primaries_min", indices_shards_index_primaries_min});
+
+    const char *ptr10[] = {"indices\":", "shards\":", "index\":", "primaries\":", "max\":"};
+    if((value = extract_json_value(api_response, ptr10, 5)) == NULL) return stats;
+    uint64_t indices_shards_index_primaries_max = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_shards_index_primaries_max", indices_shards_index_primaries_max});
+
+    const char *ptr11[] = {"indices\":", "shards\":", "index\":", "replication\":", "min\":"};
+    if((value = extract_json_value(api_response, ptr11, 5)) == NULL) return stats;
+    uint64_t indices_shards_index_replication_min = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_shards_index_replication_min", indices_shards_index_replication_min});
+
+    const char *ptr12[] = {"indices\":", "shards\":", "index\":", "replication\":", "max\":"};
+    if((value = extract_json_value(api_response, ptr12, 5)) == NULL) return stats;
+    uint64_t indices_shards_index_replication_max = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_shards_index_replication_max", indices_shards_index_replication_max});
 
 
-    const char *docs_ptr = NULL;
-    if((docs_ptr = strstr(indices_ptr, "docs\":")) == NULL) return indices;
-    if((ptr = strstr(docs_ptr, "count\":")) == NULL) return indices;
-    ptr += strlen("count\":");
-    uint64_t indices_docs_count = strtol(ptr, NULL, 0);
-    indices.insert({"cluster_stats_indices_docs_count", indices_docs_count});
 
 
-    const char *store_ptr = NULL;
-    if((store_ptr = strstr(indices_ptr, "store\":")) == NULL) return indices;
-    if((ptr = strstr(store_ptr, "size_in_bytes\":")) == NULL) return indices;
-    ptr += strlen("size_in_bytes\":");
-    uint64_t indices_store_size_in_bytes = strtol(ptr, NULL, 0);
-    indices.insert({"cluster_stats_indices_store_size_in_bytes", indices_store_size_in_bytes});
+    const char *ptr13[] = {"indices\":", "docs\":", "count\":"};
+    if((value = extract_json_value(api_response, ptr13, 3)) == NULL) return stats;
+    uint64_t indices_docs_count = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_docs_count", indices_docs_count});
 
-    return indices;
+    const char *ptr14[] = {"indices\":", "docs\":", "deleted\":"};
+    if((value = extract_json_value(api_response, ptr14, 3)) == NULL) return stats;
+    uint64_t indices_docs_deleted = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_docs_deleted", indices_docs_deleted});
+
+
+
+
+    const char *ptr15[] = {"indices\":", "store\":", "size_in_bytes\":"};
+    if((value = extract_json_value(api_response, ptr15, 3)) == NULL) return stats;
+    uint64_t indices_store_size_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_store_size_in_bytes", indices_store_size_in_bytes});
+
+    const char *ptr16[] = {"indices\":", "store\":", "throttle_time_in_millis\":"};
+    if((value = extract_json_value(api_response, ptr16, 3)) == NULL) return stats;
+    uint64_t indices_store_throttle_time_in_millis = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_store_throttle_time_in_millis", indices_store_throttle_time_in_millis});
+
+
+
+
+    const char *ptr17[] = {"indices\":", "fielddata\":", "memory_size_in_bytes\":"};
+    if((value = extract_json_value(api_response, ptr17, 3)) == NULL) return stats;
+    uint64_t indices_fielddata_memory_size_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_fielddata_memory_size_in_bytes", indices_fielddata_memory_size_in_bytes});
+
+    const char *ptr18[] = {"indices\":", "fielddata\":", "evictions\":"};
+    if((value = extract_json_value(api_response, ptr18, 3)) == NULL) return stats;
+    uint64_t cluster_stats_indices_fielddata_evictions = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_fielddata_evictions", cluster_stats_indices_fielddata_evictions});
+
+
+
+
+    const char *ptr19[] = {"indices\":", "query_cache\":", "memory_size_in_bytes\":"};
+    if((value = extract_json_value(api_response, ptr19, 3)) == NULL) return stats;
+    uint64_t indices_query_cache_memory_size_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_query_cache_memory_size_in_bytes", indices_query_cache_memory_size_in_bytes});
+
+    const char *ptr20[] = {"indices\":", "query_cache\":", "total_count\":"};
+    if((value = extract_json_value(api_response, ptr20, 3)) == NULL) return stats;
+    uint64_t indices_query_cache_total_count = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_query_cache_total_count", indices_query_cache_total_count});
+
+    const char *ptr21[] = {"indices\":", "query_cache\":", "hit_count\":"};
+    if((value = extract_json_value(api_response, ptr21, 3)) == NULL) return stats;
+    uint64_t indices_query_cache_hit_count = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_query_cache_hit_count", indices_query_cache_hit_count});
+
+    const char *ptr22[] = {"indices\":", "query_cache\":", "miss_count\":"};
+    if((value = extract_json_value(api_response, ptr22, 3)) == NULL) return stats;
+    uint64_t indices_query_cache_miss_count = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_query_cache_miss_count", indices_query_cache_miss_count});
+
+    const char *ptr23[] = {"indices\":", "query_cache\":", "cache_size\":"};
+    if((value = extract_json_value(api_response, ptr23, 3)) == NULL) return stats;
+    uint64_t indices_query_cache_cache_size = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_query_cache_cache_size", indices_query_cache_cache_size});
+
+    const char *ptr24[] = {"indices\":", "query_cache\":", "cache_count\":"};
+    if((value = extract_json_value(api_response, ptr24, 3)) == NULL) return stats;
+    uint64_t indices_query_cache_cache_count = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_query_cache_cache_count", indices_query_cache_cache_count});
+
+    const char *ptr25[] = {"indices\":", "query_cache\":", "evictions\":"};
+    if((value = extract_json_value(api_response, ptr25, 3)) == NULL) return stats;
+    uint64_t indices_query_cache_evictions = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_query_cache_evictions", indices_query_cache_evictions});
+
+
+
+
+    const char *ptr26[] = {"indices\":", "segments\":", "count\":"};
+    if((value = extract_json_value(api_response, ptr26, 3)) == NULL) return stats;
+    uint64_t indices_segments_count = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_segments_count", indices_segments_count});
+
+    const char *ptr27[] = {"indices\":", "segments\":", "memory_in_bytes\":"};
+    if((value = extract_json_value(api_response, ptr27, 3)) == NULL) return stats;
+    uint64_t indices_segments_memory_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_segments_memory_in_bytes", indices_segments_memory_in_bytes});
+
+    const char *ptr28[] = {"indices\":", "segments\":", "terms_memory_in_bytes\":"};
+    if((value = extract_json_value(api_response, ptr28, 3)) == NULL) return stats;
+    uint64_t indices_segments_terms_memory_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_segments_terms_memory_in_bytes", indices_segments_terms_memory_in_bytes});
+
+    const char *ptr29[] = {"indices\":", "segments\":", "stored_fields_memory_in_bytes\":"};
+    if((value = extract_json_value(api_response, ptr29, 3)) == NULL) return stats;
+    uint64_t indices_segments_stored_fields_memory_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_segments_stored_fields_memory_in_bytes", indices_segments_stored_fields_memory_in_bytes});
+
+    const char *ptr30[] = {"indices\":", "segments\":", "term_vectors_memory_in_bytes\":"};
+    if((value = extract_json_value(api_response, ptr30, 3)) == NULL) return stats;
+    uint64_t indices_segments_term_vectors_memory_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_segments_term_vectors_memory_in_bytes", indices_segments_term_vectors_memory_in_bytes});
+
+    const char *ptr31[] = {"indices\":", "segments\":", "norms_memory_in_bytes\":"};
+    if((value = extract_json_value(api_response, ptr31, 3)) == NULL) return stats;
+    uint64_t indices_segments_norms_memory_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_segments_norms_memory_in_bytes", indices_segments_norms_memory_in_bytes});
+
+    const char *ptr32[] = {"indices\":", "segments\":", "doc_values_memory_in_bytes\":"};
+    if((value = extract_json_value(api_response, ptr32, 3)) == NULL) return stats;
+    uint64_t indices_segments_doc_values_memory_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_segments_doc_values_memory_in_bytes", indices_segments_doc_values_memory_in_bytes});
+
+    const char *ptr33[] = {"indices\":", "segments\":", "index_writer_memory_in_bytes\":"};
+    if((value = extract_json_value(api_response, ptr33, 3)) == NULL) return stats;
+    uint64_t indices_segments_index_writer_memory_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_segments_index_writer_memory_in_bytes", indices_segments_index_writer_memory_in_bytes});
+
+    const char *ptr34[] = {"indices\":", "segments\":", "index_writer_max_memory_in_bytes\":"};
+    if((value = extract_json_value(api_response, ptr34, 3)) == NULL) return stats;
+    uint64_t indices_segments_index_writer_max_memory_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_segments_index_writer_max_memory_in_bytes", indices_segments_index_writer_max_memory_in_bytes});
+
+    const char *ptr35[] = {"indices\":", "segments\":", "version_map_memory_in_bytes\":"};
+    if((value = extract_json_value(api_response, ptr35, 3)) == NULL) return stats;
+    uint64_t indices_segments_version_map_memory_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_segments_version_map_memory_in_bytes", indices_segments_version_map_memory_in_bytes});
+
+    const char *ptr36[] = {"indices\":", "segments\":", "fixed_bit_set_memory_in_bytes\":"};
+    if((value = extract_json_value(api_response, ptr36, 3)) == NULL) return stats;
+    uint64_t indices_segments_fixed_bit_set_memory_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_indices_segments_fixed_bit_set_memory_in_bytes", indices_segments_fixed_bit_set_memory_in_bytes});
+
+
+
+
+    const char *ptr37[] = {"nodes\":", "os\":", "available_processors\":"};
+    if((value = extract_json_value(api_response, ptr37, 3)) == NULL) return stats;
+    uint64_t nodes_os_available_processors = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_nodes_os_available_processors", nodes_os_available_processors});
+
+    const char *ptr38[] = {"nodes\":", "os\":", "allocated_processors\":"};
+    if((value = extract_json_value(api_response, ptr38, 3)) == NULL) return stats;
+    uint64_t nodes_os_allocated_processors = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_nodes_os_allocated_processors", nodes_os_allocated_processors});
+
+
+
+
+    const char *ptr39[] = {"nodes\":", "process\":", "cpu\":", "percent\":"};
+    if((value = extract_json_value(api_response, ptr39, 4)) == NULL) return stats;
+    uint64_t nodes_process_cpu_percent = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_nodes_process_cpu_percent", nodes_process_cpu_percent});
+
+
+
+
+    const char *ptr40[] = {"nodes\":", "process\":", "open_file_descriptors\":", "min\":"};
+    if((value = extract_json_value(api_response, ptr40, 4)) == NULL) return stats;
+    uint64_t nodes_process_open_file_descriptors_min = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_nodes_process_open_file_descriptors_min", nodes_process_open_file_descriptors_min});
+
+    const char *ptr41[] = {"nodes\":", "process\":", "open_file_descriptors\":", "max\":"};
+    if((value = extract_json_value(api_response, ptr41, 4)) == NULL) return stats;
+    uint64_t nodes_process_open_file_descriptors_max = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_nodes_process_open_file_descriptors_max", nodes_process_open_file_descriptors_max});
+
+
+
+
+    const char *ptr42[] = {"nodes\":", "fs\":", "total_in_bytes\":"};
+    if((value = extract_json_value(api_response, ptr42, 3)) == NULL) return stats;
+    uint64_t nodes_fs_total_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_nodes_fs_total_in_bytes", nodes_fs_total_in_bytes});
+
+    const char *ptr43[] = {"nodes\":", "fs\":", "free_in_bytes\":"};
+    if((value = extract_json_value(api_response, ptr43, 3)) == NULL) return stats;
+    uint64_t nodes_fs_free_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"cluster_stats_nodes_fs_free_in_bytes", nodes_fs_free_in_bytes});
+
+    return stats;
 }
+/****** END OF CLUSTER API CLASS ******/
+/**************************************/
+/**************************************/
 
+
+/**************************************/
+/**************************************/
+/*********** NODE API CLASS ***********/
 class NodeStats : private Node
 {
-    // OS
-    std::unordered_map<std::string, std::string> hostname_ip();
-
-    // retrieve mountpoints from /etc/fstab excluding swap and print filesystem statistics
-    std::unordered_map<std::string, uint64_t> fs_stats();
-
-    std::unordered_map<std::string, uint64_t> swap_stats();
-
-    std::unordered_map<std::string, std::string> process_pid(const char *);
-
-    std::unordered_map<std::string, uint64_t> zombie_count();
-
-    std::unordered_map<std::string, uint64_t> cpu_stats();
-
-
     // API
     const char *api_response;
 
-    std::unordered_map<std::string, uint64_t> api_thread_pool_stats();
-
-    std::unordered_map<std::string, uint64_t> api_process_stats();
-
-    std::unordered_map<std::string, uint64_t> api_jvm_stats();
-
-    std::unordered_map<std::string, uint64_t> api_indices_stats();
-
-    std::unordered_map<std::string, uint64_t> api_fs_stats();
+    std::unordered_map<std::string, uint64_t> api_stats();
 
     public:
         NodeStats()
@@ -499,247 +742,225 @@ class NodeStats : private Node
             api_response = readResponse(elastic_request.c_str(), elasticsearchIP, elasticsearchPort);
             if(api_response == NULL)
                 throw std::runtime_error("Failed to construct NodeStats object: NULL response");
-            if(getHttpStatus(api_response) != 200)
-                throw std::runtime_error("Failed to construct NodeStats object: HTTP code != 200");
-            api_response = remove_headers((char **)&api_response);
         };
         ~NodeStats(){free((char *)api_response);};
 
-        std::string get_stats()
+        std::string get_api_stats()
         {
             std::string json_output;
-            json_output = json_output + api_timestamp(api_response) +
-                                        hostname_ip() + fs_stats() + swap_stats() +
-                                        process_pid("sshd") + process_pid("syslogd") +
-                                        zombie_count() + cpu_stats() +
-                                        api_thread_pool_stats() + api_process_stats() + api_jvm_stats() +
-                                        api_indices_stats() + api_fs_stats();
+            json_output = json_output + api_timestamp(api_response) + api_stats();
 
             return json_output;
         };
 };
 
-std::unordered_map<std::string, std::string> NodeStats::hostname_ip()
+std::unordered_map<std::string, uint64_t> NodeStats::api_stats()
 {
+    std::unordered_map<std::string, uint64_t> stats;
+    if(getHttpStatus(api_response) != 200) return stats;
+    api_response = remove_headers((char **)&api_response);
+    const char *value = NULL;
+
+    const char *ptr[] = {"indices\":", "docs\":", "count\":"};
+    if((value = extract_json_value(api_response, ptr, 3)) == NULL) return stats;
+    uint64_t indices_docs_count = strtol(value, NULL, 0);
+    stats.insert({"node_stats_indices_docs_count", indices_docs_count});
+
+    const char *ptr2[] = {"indices\":", "docs\":", "deleted\":"};
+    if((value = extract_json_value(api_response, ptr2, 3)) == NULL) return stats;
+    uint64_t indices_docs_deleted = strtol(value, NULL, 0);
+    stats.insert({"node_stats_indices_docs_deleted", indices_docs_deleted});
+
+    const char *ptr3[] = {"indices\":", "store\":", "size_in_bytes\":"};
+    if((value = extract_json_value(api_response, ptr3, 3)) == NULL) return stats;
+    uint64_t indices_store_size_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"node_stats_indices_store_size_in_bytes", indices_store_size_in_bytes});
+
+    const char *ptr4[] = {"indices\":", "store\":", "throttle_time_in_millis\":"};
+    if((value = extract_json_value(api_response, ptr4, 3)) == NULL) return stats;
+    uint64_t indices_store_throttle_time_in_millis = strtol(value, NULL, 0);
+    stats.insert({"node_stats_indices_store_throttle_time_in_millis", indices_store_throttle_time_in_millis});
+
+    const char *ptr5[] = {"indices\":", "indexing\":", "index_total\":"};
+    if((value = extract_json_value(api_response, ptr5, 3)) == NULL) return stats;
+    uint64_t indices_indexing_index_total = strtol(value, NULL, 0);
+    stats.insert({"node_stats_indices_indexing_index_total", indices_indexing_index_total});
+
+    const char *ptr6[] = {"indices\":", "indexing\":", "index_time_in_millis\":"};
+    if((value = extract_json_value(api_response, ptr6, 3)) == NULL) return stats;
+    uint64_t indices_indexing_index_time_in_millis = strtol(value, NULL, 0);
+    stats.insert({"node_stats_indices_indexing_index_time_in_millis", indices_indexing_index_time_in_millis});
+
+    const char *ptr7[] = {"indices\":", "indexing\":", "index_current\":"};
+    if((value = extract_json_value(api_response, ptr7, 3)) == NULL) return stats;
+    uint64_t indices_indexing_index_current = strtol(value, NULL, 0);
+    stats.insert({"node_stats_indices_indexing_index_current", indices_indexing_index_current});
+
+    const char *ptr8[] = {"indices\":", "indexing\":", "index_failed\":"};
+    if((value = extract_json_value(api_response, ptr8, 3)) == NULL) return stats;
+    uint64_t indices_indexing_index_failed = strtol(value, NULL, 0);
+    stats.insert({"node_stats_indices_indexing_index_failed", indices_indexing_index_failed});
+
+    const char *ptr9[] = {"indices\":", "indexing\":", "delete_total\":"};
+    if((value = extract_json_value(api_response, ptr9, 3)) == NULL) return stats;
+    uint64_t indices_indexing_delete_total = strtol(value, NULL, 0);
+    stats.insert({"node_stats_indices_indexing_delete_total", indices_indexing_delete_total});
+
+    const char *ptr10[] = {"indices\":", "indexing\":", "delete_time_in_millis\":"};
+    if((value = extract_json_value(api_response, ptr10, 3)) == NULL) return stats;
+    uint64_t indices_indexing_delete_time_in_millis = strtol(value, NULL, 0);
+    stats.insert({"node_stats_indices_indexing_delete_time_in_millis", indices_indexing_delete_time_in_millis});
+
+    const char *ptr11[] = {"indices\":", "indexing\":", "delete_current\":"};
+    if((value = extract_json_value(api_response, ptr11, 3)) == NULL) return stats;
+    uint64_t indices_indexing_delete_current = strtol(value, NULL, 0);
+    stats.insert({"node_stats_indices_indexing_delete_current", indices_indexing_delete_current});
+
+    const char *ptr12[] = {"indices\":", "indexing\":", "noop_update_total\":"};
+    if((value = extract_json_value(api_response, ptr12, 3)) == NULL) return stats;
+    uint64_t indices_indexing_noop_update_total = strtol(value, NULL, 0);
+    stats.insert({"node_stats_indices_indexing_noop_update_total", indices_indexing_noop_update_total});
+
+    const char *ptr13[] = {"indices\":", "indexing\":", "is_throttled\":"};
+    if((value = extract_json_value(api_response, ptr13, 3)) == NULL) return stats;
+    char bool_max[6];
+    size_t bool_size = strcspn(value, ",");
+    snprintf(bool_max, bool_size + 1, "%s", value);
+    uint64_t indices_indexing_is_throttled = (std::string(bool_max) == "true") ? 1 : 0;
+    stats.insert({"node_stats_indices_indexing_is_throttled", indices_indexing_is_throttled});
+
+    const char *ptr14[] = {"indices\":", "indexing\":", "throttle_time_in_millis\":"};
+    if((value = extract_json_value(api_response, ptr14, 3)) == NULL) return stats;
+    uint64_t node_stats_indices_indexing_throttle_time_in_millis = strtol(value, NULL, 0);
+    stats.insert({"node_stats_indices_indexing_throttle_time_in_millis", node_stats_indices_indexing_throttle_time_in_millis});
+
+
+
+/*
+    const char *ptr19[] = {"indices\":", "search\":", "query_total\":"};
+    if((value = extract_json_value(api_response, ptr19, 3)) == NULL) return stats;
+    uint64_t indices_search_query_total = strtol(value, NULL, 0);
+    stats.insert({"node_stats_indices_search_query_total", indices_search_query_total});
+
+    const char *ptr20[] = {"indices\":", "search\":", "query_time_in_millis\":"};
+    if((value = extract_json_value(api_response, ptr20, 3)) == NULL) return stats;
+    uint64_t indices_search_query_time_in_millis = strtol(value, NULL, 0);
+    stats.insert({"node_stats_indices_search_query_time_in_millis", indices_search_query_time_in_millis});
+
+
+
+
+    const char *ptr21[] = {"indices\":", "segments\":", "count\":"};
+    if((value = extract_json_value(api_response, ptr21, 3)) == NULL) return stats;
+    uint64_t indices_segments_count = strtol(value, NULL, 0);
+    stats.insert({"node_stats_indices_segments_count", indices_segments_count});
+
+
+
+
+
+
+
+    const char *ptr[] = {"thread_pool\":", "bulk\":", "rejected\":"};
+    if((value = extract_json_value(api_response, ptr, 3)) == NULL) return stats;
+    uint64_t thread_pool_bulk_rejected = strtol(value, NULL, 0);
+    stats.insert({"node_stats_thread_pool_bulk_rejected", thread_pool_bulk_rejected});
+
+    const char *ptr2[] = {"thread_pool\":", "index\":", "rejected\":"};
+    if((value = extract_json_value(api_response, ptr2, 3)) == NULL) return stats;
+    uint64_t thread_pool_index_rejected = strtol(value, NULL, 0);
+    stats.insert({"node_stats_thread_pool_index_rejected", thread_pool_index_rejected});
+
+    const char *ptr3[] = {"thread_pool\":", "search\":", "rejected\":"};
+    if((value = extract_json_value(api_response, ptr3, 3)) == NULL) return stats;
+    uint64_t thread_pool_search_rejected = strtol(value, NULL, 0);
+    stats.insert({"node_stats_thread_pool_search_rejected", thread_pool_search_rejected});
+
+
+
+
+    const char *ptr4[] = {"process\":", "open_file_descriptors\":"};
+    if((value = extract_json_value(api_response, ptr4, 2)) == NULL) return stats;
+    uint64_t process_open_file_descriptors = strtol(value, NULL, 0);
+    stats.insert({"node_stats_process_open_file_descriptors", process_open_file_descriptors});
+
+    const char *ptr5[] = {"process\":", "max_file_descriptors\":"};
+    if((value = extract_json_value(api_response, ptr5, 2)) == NULL) return stats;
+    uint64_t process_max_file_descriptors = strtol(value, NULL, 0);
+    stats.insert({"node_stats_process_max_file_descriptors", process_max_file_descriptors});
+
+    const char *ptr6[] = {"process\":", "cpu\":", "percent\":"};
+    if((value = extract_json_value(api_response, ptr6, 3)) == NULL) return stats;
+    uint64_t process_cpu_percent = strtol(value, NULL, 0);
+    stats.insert({"node_stats_process_cpu_percent", process_cpu_percent});
+
+
+
+
+    const char *ptr7[] = {"jvm\":", "mem\":", "heap_used_in_bytes\":"};
+    if((value = extract_json_value(api_response, ptr7, 3)) == NULL) return stats;
+    uint64_t jvm_mem_heap_used_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"node_stats_jvm_mem_heap_used_in_bytes", jvm_mem_heap_used_in_bytes});
+
+    const char *ptr8[] = {"jvm\":", "mem\":", "heap_used_percent\":"};
+    if((value = extract_json_value(api_response, ptr8, 3)) == NULL) return stats;
+    uint64_t jvm_mem_heap_used_percent = strtol(value, NULL, 0);
+    stats.insert({"node_stats_jvm_mem_heap_used_percent", jvm_mem_heap_used_percent});
+
+    const char *ptr9[] = {"jvm\":", "gc\":", "collectors\":", "young\":", "collection_count\":"};
+    if((value = extract_json_value(api_response, ptr9, 5)) == NULL) return stats;
+    uint64_t jvm_gc_collectors_young_collection_count = strtol(value, NULL, 0);
+    stats.insert({"node_stats_jvm_gc_collectors_young_collection_count", jvm_gc_collectors_young_collection_count});
+
+    const char *ptr10[] = {"jvm\":", "gc\":", "collectors\":", "young\":", "collection_time_in_millis\":"};
+    if((value = extract_json_value(api_response, ptr10, 5)) == NULL) return stats;
+    uint64_t jvm_gc_collectors_young_collection_time_in_millis = strtol(value, NULL, 0);
+    stats.insert({"node_stats_jvm_gc_collectors_young_collection_time_in_millis", jvm_gc_collectors_young_collection_time_in_millis});
+
+    const char *ptr11[] = {"jvm\":", "gc\":", "collectors\":", "old\":", "collection_count\":"};
+    if((value = extract_json_value(api_response, ptr11, 5)) == NULL) return stats;
+    uint64_t jvm_gc_collectors_old_collection_count = strtol(value, NULL, 0);
+    stats.insert({"node_stats_jvm_gc_collectors_old_collection_count", jvm_gc_collectors_old_collection_count});
+
+    const char *ptr12[] = {"jvm\":", "gc\":", "collectors\":", "old\":", "collection_time_in_millis\":"};
+    if((value = extract_json_value(api_response, ptr12, 5)) == NULL) return stats;
+    uint64_t jvm_gc_collectors_old_collection_time_in_millis = strtol(value, NULL, 0);
+    stats.insert({"node_stats_jvm_gc_collectors_old_collection_time_in_millis", jvm_gc_collectors_old_collection_time_in_millis});
+
+
+
+
+
+    const char *ptr22[] = {"fs\":", "total\":", "total_in_bytes\":"};
+    if((value = extract_json_value(api_response, ptr22, 3)) == NULL) return stats;
+    uint64_t fs_total_total_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"node_stats_fs_total_total_in_bytes", fs_total_total_in_bytes});
+
+    const char *ptr23[] = {"fs\":", "total\":", "free_in_bytes\":"};
+    if((value = extract_json_value(api_response, ptr23, 3)) == NULL) return stats;
+    uint64_t fs_total_free_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"node_stats_fs_total_free_in_bytes", fs_total_free_in_bytes});
+*/
+    return stats;
+}
+/******** END OF NODE API CLASS ********/
+/***************************************/
+/***************************************/
+
+
+/***************************************/
+/***************************************/
+/************ OS FUNCTIONS *************/
+std::unordered_map<std::string, std::string> hostname_ip()
+{
+    Node node;
     std::unordered_map<std::string, std::string> address;
-    address.insert({"source_node_host", nodeHostname});
-    address.insert({"source_node_ip", nodeIP});
+    address.insert({"source_node_host", node.getNodeHostname()});
+    address.insert({"source_node_ip", node.getNodeIP()});
     return address;
 }
 
-std::unordered_map<std::string, uint64_t> NodeStats::api_thread_pool_stats()
-{
-    std::unordered_map<std::string, uint64_t> thread_pool;
-    const char *thread_pool_ptr = NULL;
-    if((thread_pool_ptr = strstr(api_response, "thread_pool\":")) == NULL) return thread_pool;
-
-    const char *ptr = NULL;
-    const size_t rejected = strlen("rejected\":");
-    if((ptr = strstr(thread_pool_ptr, "bulk\":")) == NULL) return thread_pool;
-    if((ptr = strstr(ptr, "rejected\":")) == NULL) return thread_pool;
-    ptr += rejected;
-    uint64_t bulk_rejected = strtol(ptr, NULL, 0);
-    thread_pool.insert({"node_stats_thread_pool_bulk_rejected", bulk_rejected});
-
-
-    if((ptr = strstr(thread_pool_ptr, "index\":")) == NULL) return thread_pool;
-    if((ptr = strstr(ptr, "rejected\":")) == NULL) return thread_pool;
-    ptr += rejected;
-    uint64_t index_rejected = strtol(ptr, NULL, 0);
-    thread_pool.insert({"node_stats_thread_pool_index_rejected", index_rejected});
-
-
-    if((ptr = strstr(thread_pool_ptr, "search\":")) == NULL) return thread_pool;
-    if((ptr = strstr(ptr, "rejected\":")) == NULL) return thread_pool;
-    ptr += rejected;
-    uint64_t search_rejected = strtol(ptr, NULL, 0);
-    thread_pool.insert({"node_stats_thread_pool_search_rejected", search_rejected});
-
-
-    return thread_pool;
-}
-
-std::unordered_map<std::string, uint64_t> NodeStats::api_process_stats()
-{
-    std::unordered_map<std::string, uint64_t> api_process;
-    const char *process_ptr = NULL;
-    if((process_ptr = strstr(api_response, "process\":")) == NULL) return api_process;
-
-    const char *ptr = NULL;
-    if((ptr = strstr(process_ptr, "open_file_descriptors\":")) == NULL) return api_process;
-    ptr += strlen("open_file_descriptors\":");
-    uint64_t open_file_descriptors = strtol(ptr, NULL, 0);
-    api_process.insert({"node_stats_process_open_file_descriptors", open_file_descriptors});
-
-
-    if((ptr = strstr(process_ptr, "max_file_descriptors\":")) == NULL) return api_process;
-    ptr += strlen("max_file_descriptors\":");
-    uint64_t max_file_descriptors = strtol(ptr, NULL, 0);
-    api_process.insert({"node_stats_process_max_file_descriptors", max_file_descriptors});
-
-
-    if((ptr = strstr(process_ptr, "percent\":")) == NULL) return api_process;
-    ptr += strlen("percent\":");
-    uint64_t cpu_percent = strtol(ptr, NULL, 0);
-    api_process.insert({"node_stats_process_cpu_percent", cpu_percent});
-
-
-    return api_process;
-}
-
-std::unordered_map<std::string, uint64_t> NodeStats::api_jvm_stats()
-{
-    std::unordered_map<std::string, uint64_t> jvm;
-    const char *mem_ptr = NULL;
-    if((mem_ptr = strstr(api_response, "mem\":")) == NULL) return jvm;
-
-    const char *ptr = NULL;
-    if((ptr = strstr(mem_ptr, "heap_used_in_bytes\":")) == NULL) return jvm;
-    ptr += strlen("heap_used_in_bytes\":");
-    uint64_t heap_used_in_bytes = strtol(ptr, NULL, 0);
-    jvm.insert({"node_stats_jvm_mem_heap_used_in_bytes", heap_used_in_bytes});
-
-
-    if((ptr = strstr(mem_ptr, "heap_used_percent\":")) == NULL) return jvm;
-    ptr += strlen("heap_used_percent\":");
-    uint64_t heap_used_percent = strtol(ptr, NULL, 0);
-    jvm.insert({"node_stats_jvm_mem_heap_used_percent", heap_used_percent});
-
-
-    const char *gc_ptr = NULL;
-    if((gc_ptr = strstr(api_response, "gc\":")) == NULL) return jvm;
-
-    const char *gc_young_ptr = NULL;
-    if((gc_young_ptr = strstr(gc_ptr, "young\":")) == NULL) return jvm;
-
-    if((ptr = strstr(gc_young_ptr, "collection_count\":")) == NULL) return jvm;
-    ptr += strlen("collection_count\":");
-    uint64_t young_collection_count = strtol(ptr, NULL, 0);
-    jvm.insert({"node_stats_jvm_gc_collectors_young_collection_count", young_collection_count});
-
-
-    if((ptr = strstr(gc_young_ptr, "collection_time_in_millis\":")) == NULL) return jvm;
-    ptr += strlen("collection_time_in_millis\":");
-    uint64_t young_collection_time_in_millis = strtol(ptr, NULL, 0);
-    jvm.insert({"node_stats_jvm_gc_collectors_young_collection_time_in_millis", young_collection_time_in_millis});
-
-
-    const char *gc_old_ptr = NULL;
-    if((gc_old_ptr = strstr(gc_ptr, "old\":")) == NULL) return jvm;
-
-    if((ptr = strstr(gc_old_ptr, "collection_count\":")) == NULL) return jvm;
-    ptr += strlen("collection_count\":");
-    uint64_t old_collection_count = strtol(ptr, NULL, 0);
-    jvm.insert({"node_stats_jvm_gc_collectors_old_collection_count", old_collection_count});
-
-
-    if((ptr = strstr(gc_old_ptr, "collection_time_in_millis\":")) == NULL) return jvm;
-    ptr += strlen("collection_time_in_millis\":");
-    uint64_t old_collection_time_in_millis = strtol(ptr, NULL, 0);
-    jvm.insert({"node_stats_jvm_gc_collectors_old_collection_time_in_millis", old_collection_time_in_millis});
-
-
-    return jvm;
-}
-
-std::unordered_map<std::string, uint64_t> NodeStats::api_indices_stats()
-{
-    std::unordered_map<std::string, uint64_t> indices;
-    const char *docs_ptr = NULL;
-    if((docs_ptr = strstr(api_response, "docs\":")) == NULL) return indices;
-    const char *store_ptr = NULL;
-    if((store_ptr = strstr(api_response, "store\":")) == NULL) return indices;
-    const char *indexing_ptr = NULL;
-    if((indexing_ptr = strstr(api_response, "indexing\":")) == NULL) return indices;
-    const char *search_ptr = NULL;
-    if((search_ptr = strstr(api_response, "search\":")) == NULL) return indices;
-    const char *segments_ptr = NULL;
-    if((segments_ptr = strstr(api_response, "segments\":")) == NULL) return indices;
-
-
-    const char *ptr = NULL;
-    if((ptr = strstr(docs_ptr, "count\":")) == NULL) return indices;
-    ptr += strlen("count\":");
-    uint64_t docs_count = strtol(ptr, NULL, 0);
-    indices.insert({"node_stats_indices_docs_count", docs_count});
-
-
-    if((ptr = strstr(store_ptr, "size_in_bytes\":")) == NULL) return indices;
-    ptr += strlen("size_in_bytes\":");
-    uint64_t store_size_in_bytes = strtol(ptr, NULL, 0);
-    indices.insert({"node_stats_indices_store_size_in_bytes", store_size_in_bytes});
-
-
-    if((ptr = strstr(store_ptr, "throttle_time_in_millis\":")) == NULL) return indices;
-    ptr += strlen("throttle_time_in_millis\":");
-    uint64_t store_throttle_time_in_millis = strtol(ptr, NULL, 0);
-    indices.insert({"node_stats_indices_store_throttle_time_in_millis", store_throttle_time_in_millis});
-
-
-    if((ptr = strstr(indexing_ptr, "index_total\":")) == NULL) return indices;
-    ptr += strlen("index_total\":");
-    uint64_t indexing_index_total = strtol(ptr, NULL, 0);
-    indices.insert({"node_stats_indices_indexing_index_total", indexing_index_total});
-
-
-    if((ptr = strstr(indexing_ptr, "index_time_in_millis\":")) == NULL) return indices;
-    ptr += strlen("index_time_in_millis\":");
-    uint64_t indexing_index_time_in_millis = strtol(ptr, NULL, 0);
-    indices.insert({"node_stats_indices_indexing_index_time_in_millis", indexing_index_time_in_millis});
-
-
-    if((ptr = strstr(indexing_ptr, "throttle_time_in_millis\":")) == NULL) return indices;
-    ptr += strlen("throttle_time_in_millis\":");
-    uint64_t indexing_throttle_time_in_millis = strtol(ptr, NULL, 0);
-    indices.insert({"node_stats_indices_indexing_throttle_time_in_millis", indexing_throttle_time_in_millis});
-
-
-    if((ptr = strstr(search_ptr, "query_total\":")) == NULL) return indices;
-    ptr += strlen("query_total\":");
-    uint64_t search_query_total = strtol(ptr, NULL, 0);
-    indices.insert({"node_stats_indices_search_query_total", search_query_total});
-
-
-    if((ptr = strstr(search_ptr, "query_time_in_millis\":")) == NULL) return indices;
-    ptr += strlen("query_time_in_millis\":");
-    uint64_t search_query_time_in_millis = strtol(ptr, NULL, 0);
-    indices.insert({"node_stats_indices_search_query_time_in_millis", search_query_time_in_millis});
-
-
-    if((ptr = strstr(segments_ptr, "count\":")) == NULL) return indices;
-    ptr += strlen("count\":");
-    uint64_t segments_count = strtol(ptr, NULL, 0);
-    indices.insert({"node_stats_indices_segments_count", segments_count});
-
-
-    return indices;
-}
-
-std::unordered_map<std::string, uint64_t> NodeStats::api_fs_stats()
-{
-    std::unordered_map<std::string, uint64_t> api_fs;
-    const char *fs_ptr = NULL;
-    if((fs_ptr = strstr(api_response, "fs\":")) == NULL) return api_fs;
-    const char *fs_total_ptr = NULL;
-    if((fs_total_ptr = strstr(fs_ptr, "total\":")) == NULL) return api_fs;
-
-    const char *ptr = NULL;
-    if((ptr = strstr(fs_total_ptr, "total_in_bytes\":")) == NULL) return api_fs;
-    ptr += strlen("total_in_bytes\":");
-    uint64_t total_in_bytes = strtol(ptr, NULL, 0);
-    api_fs.insert({"node_stats_fs_total_in_bytes", total_in_bytes});
-
-
-    if((ptr = strstr(fs_total_ptr, "free_in_bytes\":")) == NULL) return api_fs;
-    ptr += strlen("free_in_bytes\":");
-    uint64_t free_in_bytes = strtol(ptr, NULL, 0);
-    api_fs.insert({"node_stats_fs_free_in_bytes", free_in_bytes});
-
-
-    return api_fs;
-}
-
-std::unordered_map<std::string, uint64_t> NodeStats::fs_stats()
+std::unordered_map<std::string, uint64_t> fs_stats()
 {
     std::unordered_map<std::string, uint64_t> fs;
     FILE* file = NULL;
@@ -782,7 +1003,7 @@ std::unordered_map<std::string, uint64_t> NodeStats::fs_stats()
     return fs;
 }
 
-std::unordered_map<std::string, uint64_t> NodeStats::swap_stats()
+std::unordered_map<std::string, uint64_t> swap_stats()
 {
     std::unordered_map<std::string, uint64_t> swap;
     std::ifstream ifs("/proc/swaps");
@@ -805,7 +1026,7 @@ std::unordered_map<std::string, uint64_t> NodeStats::swap_stats()
     return swap;
 }
 
-std::unordered_map<std::string, std::string> NodeStats::process_pid(const char *name)
+std::unordered_map<std::string, std::string> process_pid(const char *name)
 {
     std::unordered_map<std::string, std::string> process;
     DIR *dir;
@@ -842,7 +1063,7 @@ std::unordered_map<std::string, std::string> NodeStats::process_pid(const char *
     return process;
 }
 
-std::unordered_map<std::string, uint64_t> NodeStats::zombie_count()
+std::unordered_map<std::string, uint64_t> zombie_count()
 {
     std::unordered_map<std::string, uint64_t> zombie;
     DIR *dir;
@@ -880,7 +1101,7 @@ std::unordered_map<std::string, uint64_t> NodeStats::zombie_count()
     return zombie;
 }
 
-std::unordered_map<std::string, uint64_t> NodeStats::cpu_stats()
+std::unordered_map<std::string, uint64_t> cpu_stats()
 {
     std::unordered_map<std::string, uint64_t> processor;
     std::string line;
@@ -915,6 +1136,9 @@ std::unordered_map<std::string, uint64_t> NodeStats::cpu_stats()
     processor.insert({"node_stats_cpu_iowait_percent", iowait_percent});
     return processor;
 }
+/********* END OF OS FUNCTIONS *********/
+/***************************************/
+/***************************************/
 
 int main()
 {
@@ -924,19 +1148,23 @@ int main()
         //for(;;)
         //{
             // Nodes stats
+            std::string os_stats;
+            os_stats = os_stats + hostname_ip() + fs_stats() + swap_stats() +
+                        process_pid("sshd") + process_pid("syslogd") +
+                        zombie_count() + cpu_stats();
             try
             {
                 NodeStats node;
 
-                std::cout << node.get_stats() << std::endl;
-                //sendData(json_output.c_str(), "127.0.0.1", 6106);
-                //sendDataToElasticsearch(json_output, "marvel_new", "127.0.0.1", 9200);
-
-                //std::cout << stats.get_cpu_stats() << std::endl;
+                //std::cout << node.get_api_stats() << std::endl;
+                sendDataToElasticsearch(node.get_api_stats(), "marvel_new", "127.0.0.1", 9200);
+                sendDataToElasticsearch(os_stats, "marvel_new", "127.0.0.1", 9200);
             }
             catch(const std::runtime_error &error)
             {
                 std::cerr << error.what() << std::endl;
+                // if elasticsearch is unavailable, then send os stats somewhere else(e.g. logstash)
+                sendData(os_stats.c_str(), "127.0.0.1", 6110);
             }
 
             // Cluster stats
@@ -944,7 +1172,8 @@ int main()
             {
                 ClusterStats cluster;
 
-                std::cout << cluster.get_stats() << std::endl;
+                //std::cout << cluster.get_api_stats() << std::endl;
+                sendDataToElasticsearch(cluster.get_api_stats(), "marvel_new", "127.0.0.1", 9200);
             }
             catch(const std::runtime_error &error)
             {
