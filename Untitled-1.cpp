@@ -38,9 +38,52 @@ std::unordered_map<std::string, uint64_t> zombie_count();
 // returns associative array with cpu percentage when in busy,iowait state in 1s interval
 std::unordered_map<std::string, uint64_t> cpu_stats();
 
+// returns associative array with systemd service status
+std::unordered_map<std::string, std::string> systemd_service_status(const std::string &);
+
 /********************************/
 /********************************/
 /*** GENERIC HELPER FUNCTIONS ***/
+int getCommandOutput(const std::string &command, std::string &output)
+{
+    FILE *f = NULL;
+    if((f = popen(command.c_str(), "r")) == NULL) return -1;
+
+    int c = fgetc(f);
+    while(c != EOF && c != '\n')
+    {
+        output.push_back(c);
+        c = fgetc(f);
+    }
+
+    return pclose(f);
+}
+
+int node_hostname_ip(std::string &nodeHostname, std::string &nodeIP)
+{
+    char hostname[HOST_NAME_MAX];
+    if(gethostname(hostname, HOST_NAME_MAX) != 0)
+        return -1;
+    nodeHostname = hostname;
+
+	struct addrinfo hints, *info;
+	struct sockaddr_in *s;
+    char ip[IP_MAX];
+
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_INET;
+	hints.ai_socktype = SOCK_STREAM;
+
+	if(getaddrinfo(hostname, NULL, &hints, &info) != 0)
+		return -1;
+
+	s = (struct sockaddr_in *)info->ai_addr;
+    snprintf(ip, sizeof(ip), "%s", inet_ntoa(s->sin_addr));
+	freeaddrinfo(info);
+    nodeIP = ip;
+    return 0;
+}
+
 unsigned long hostnameToIP(const char *hostname)
 {
 	struct addrinfo hints, *info;
@@ -332,7 +375,6 @@ template std::string &operator+(std::string &sum, const std::unordered_map<std::
 // methods common for both node and cluster stats
 class Node
 {
-    int node_hostname_ip();
     int master_node_ip();
 
     protected:
@@ -349,13 +391,11 @@ class Node
     {
         elasticsearchIP = "127.0.0.1";
         elasticsearchPort = 9200;
-        if(node_hostname_ip() == -1)
+        if(node_hostname_ip(nodeHostname, nodeIP) == -1)
             throw std::runtime_error("Failed to construct Node object: Hostname/IP unknown");
         if(master_node_ip() == -1)
             throw std::runtime_error("Failed to construct Node object: Unable to determine master node");
     };
-    std::string getNodeIP() const{return nodeIP;};
-    std::string getNodeHostname() const{return nodeHostname;};
 };
 
 const char *Node::extract_json_value(const char *response, const char **json_key, int levels)
@@ -405,31 +445,6 @@ int Node::master_node_ip()
     istream >> tmp >> tmp >> masterNodeIP;
 
     free((char *)response);
-    return 0;
-}
-
-int Node::node_hostname_ip()
-{
-    char hostname[HOST_NAME_MAX];
-    if(gethostname(hostname, HOST_NAME_MAX) != 0)
-        return -1;
-    nodeHostname = hostname;
-
-	struct addrinfo hints, *info;
-	struct sockaddr_in *s;
-    char ip[IP_MAX];
-
-	memset(&hints, 0, sizeof(hints));
-	hints.ai_family = AF_INET;
-	hints.ai_socktype = SOCK_STREAM;
-
-	if(getaddrinfo(hostname, NULL, &hints, &info) != 0)
-		return -1;
-
-	s = (struct sockaddr_in *)info->ai_addr;
-    snprintf(ip, sizeof(ip), "%s", inet_ntoa(s->sin_addr));
-	freeaddrinfo(info);
-    nodeIP = ip;
     return 0;
 }
 /******* END OF NODE BASE CLASS *******/
@@ -1074,10 +1089,12 @@ std::unordered_map<std::string, uint64_t> NodeStats::api_stats()
 /************ OS FUNCTIONS *************/
 std::unordered_map<std::string, std::string> hostname_ip()
 {
-    Node node;
     std::unordered_map<std::string, std::string> address;
-    address.insert({"source_node_host", node.getNodeHostname()});
-    address.insert({"source_node_ip", node.getNodeIP()});
+    std::string hostname, ip;
+
+    if(node_hostname_ip(hostname, ip) == -1) return address;
+    address.insert({"source_node_host", hostname});
+    address.insert({"source_node_ip", ip});
     return address;
 }
 
@@ -1257,6 +1274,15 @@ std::unordered_map<std::string, uint64_t> cpu_stats()
     processor.insert({"node_stats_cpu_iowait_percent", iowait_percent});
     return processor;
 }
+
+std::unordered_map<std::string, std::string> systemd_service_status(const std::string &service)
+{
+    std::unordered_map<std::string, std::string> service_status;
+    std::string status;
+    if(getCommandOutput("systemctl is-active " + service, status) != -1) service_status.insert({"node_stats_systemd_service_" + service, status});
+
+    return service_status;
+}
 /********* END OF OS FUNCTIONS *********/
 /***************************************/
 /***************************************/
@@ -1268,11 +1294,36 @@ int main()
     //{
         //for(;;)
         //{
-            // Nodes stats
+            // Stats common for all nodes
             std::string os_stats;
             os_stats = os_stats + hostname_ip() + fs_stats() + swap_stats() +
                         process_pid("sshd") + process_pid("syslogd") +
                         zombie_count() + cpu_stats();
+
+            /*** Stats specific to a node for a specific environment
+             *   Feel free to remove
+             ***/
+            std::string ip = hostname_ip()["source_node_ip"];
+            if(ip == "100.127.111.14" || ip == "100.127.111.15" || ip == "100.127.111.16")
+            {
+                os_stats = os_stats + systemd_service_status("elasticsearch") + systemd_service_status("logstash") + systemd_service_status("metricbeat") +
+                            systemd_service_status("pacemaker") + systemd_service_status("pcsd") + systemd_service_status("corosync") +
+                            systemd_service_status("kpi_raw_generator");
+            }
+            else if(ip == "10.235.0.22" || ip == "10.235.0.23" || ip == "10.235.0.24")
+            {
+                os_stats = os_stats + systemd_service_status("kafka") + systemd_service_status("zookeeper") + systemd_service_status("httpbeat") +
+                            systemd_service_status("logstash") + systemd_service_status("metricbeat") + systemd_service_status("ccpe") +
+                            systemd_service_status("ucmdb") + systemd_service_status("zabbix");
+            }
+            else if(ip == "10.235.0.19" || ip == "10.235.0.20")
+            {
+                os_stats = os_stats + systemd_service_status("kibana") + systemd_service_status("elastalert") + systemd_service_status("elasticsearch") +
+                            systemd_service_status("metricbeat") + systemd_service_status("pacemaker") + systemd_service_status("pcsd") +
+                            systemd_service_status("corosync");
+            }
+            /*** END ***/
+
             try
             {
                 NodeStats node;
@@ -1285,6 +1336,7 @@ int main()
             {
                 std::cerr << error.what() << std::endl;
                 // if elasticsearch is unavailable, then send os stats somewhere else(e.g. logstash)
+                os_stats.push_back('\n');
                 sendData(os_stats.c_str(), "127.0.0.1", 6110);
             }
 
