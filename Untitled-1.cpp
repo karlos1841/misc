@@ -35,6 +35,9 @@ std::unordered_map<std::string, std::string> process_pid(const char *);
 // returns associative array with the number of zombie processes
 std::unordered_map<std::string, uint64_t> zombie_count();
 
+// returns associative array with network stats from /sys/class/net/*/statistics/
+std::unordered_map<std::string, uint64_t> net_stats();
+
 // returns associative array with cpu percentage when in busy,iowait state in 1s interval
 std::unordered_map<std::string, uint64_t> cpu_stats();
 
@@ -1239,6 +1242,42 @@ std::unordered_map<std::string, uint64_t> zombie_count()
     return zombie;
 }
 
+std::unordered_map<std::string, uint64_t> net_stats()
+{
+    std::unordered_map<std::string, uint64_t> net;
+    DIR *dir, *dir2;
+    struct dirent *ent, *ent2;
+    std::string path = "/sys/class/net/";
+    std::string path2;
+    std::ifstream file;
+    std::string line;
+    std::istringstream iss;
+    uint64_t value;
+
+    if((dir = opendir(path.c_str())) == NULL) return net;
+    while((ent = readdir(dir)) != NULL)
+    {
+        path2 = path + ent->d_name + "/statistics/";
+        if((dir2 = opendir(path2.c_str())) == NULL) continue;
+        while((ent2 = readdir(dir2)) != NULL)
+        {
+            if(!(strcmp(ent2->d_name, ".") && strcmp(ent2->d_name, ".."))) continue;
+            file.open(path2 + ent2->d_name);
+            if(!file.good()) continue;
+            std::getline(file, line);
+            file.close();
+            iss.str(line);
+            iss >> value;
+            iss.clear();
+            net.insert({"node_stats_" + std::string(ent->d_name) + "_" + std::string(ent2->d_name), value});
+        }
+        closedir(dir2);
+    }
+
+    closedir(dir);
+    return net;
+}
+
 std::unordered_map<std::string, uint64_t> cpu_stats()
 {
     std::unordered_map<std::string, uint64_t> processor;
@@ -1298,7 +1337,7 @@ int main()
             std::string os_stats;
             os_stats = os_stats + hostname_ip() + fs_stats() + swap_stats() +
                         process_pid("sshd") + process_pid("syslogd") +
-                        zombie_count() + cpu_stats();
+                        zombie_count() + cpu_stats() + net_stats();
 
             /*** Stats specific to a node for a specific environment
              *   Feel free to remove
