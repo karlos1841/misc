@@ -17,6 +17,7 @@
 #include <netdb.h>
 #include <sys/vfs.h>
 
+#define _XOPEN_SOURCE 700 // POSIX 2008
 #define IP_MAX 16
 
 /*** OS METRICS USING LINUX/POSIX LIBRARIES ***/
@@ -1287,6 +1288,8 @@ std::unordered_map<std::string, uint64_t> cpu_stats()
     uint64_t busy_time[2];
     uint64_t total_time[2];
     uint64_t iowait_time[2];
+    const struct timespec req = {1, 0};
+    struct timespec rem;
 
     for(int i = 0; i < 2; i++)
     {
@@ -1304,7 +1307,7 @@ std::unordered_map<std::string, uint64_t> cpu_stats()
         busy_time[i] = user + nice + system + irq + softirq + steal + guest + guest_nice;
         total_time[i] = idle_time[i] + busy_time[i];
 
-        sleep(1);
+        if(i == 0) nanosleep(&req, &rem);
     }
 
     uint64_t busy_time_percent = 100 * (busy_time[1] - busy_time[0]) / (total_time[1] - total_time[0]);
@@ -1312,6 +1315,35 @@ std::unordered_map<std::string, uint64_t> cpu_stats()
     processor.insert({"node_stats_cpu_busy_percent", busy_time_percent});
     processor.insert({"node_stats_cpu_iowait_percent", iowait_percent});
     return processor;
+}
+
+std::unordered_map<std::string, uint64_t> vm_stats()
+{
+    std::unordered_map<std::string, uint64_t> vm;
+    std::ifstream file;
+    std::string line, match;
+    std::istringstream iss;
+    uint64_t value[2];
+    const struct timespec req = {1, 0};
+    struct timespec rem;
+
+    for(int i = 0; i < 2; i++)
+    {
+        file.open("/proc/vmstat");
+        if(!file.good()) return vm;
+        while(std::getline(file, line))
+        {
+            iss.str(line);
+            iss >> match >> value[i];
+            iss.clear();
+            if(match == "pgpgout") break;
+        }
+        file.close();
+        if(i == 0) nanosleep(&req, &rem);
+    }
+
+    vm.insert({"node_stats_pgpgout_in_kilobytes_per_sec", value[1] - value[0]});
+    return vm;
 }
 
 std::unordered_map<std::string, std::string> systemd_service_status(const std::string &service)
@@ -1337,7 +1369,7 @@ int main()
             std::string os_stats;
             os_stats = os_stats + hostname_ip() + fs_stats() + swap_stats() +
                         process_pid("sshd") + process_pid("syslogd") +
-                        zombie_count() + cpu_stats() + net_stats();
+                        zombie_count() + cpu_stats() + net_stats() + vm_stats();
 
             /*** Stats specific to a node for a specific environment
              *   Feel free to remove
