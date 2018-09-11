@@ -42,6 +42,9 @@ std::unordered_map<std::string, uint64_t> net_stats();
 // returns associative array with cpu percentage when in busy,iowait state in 1s interval
 std::unordered_map<std::string, uint64_t> cpu_stats();
 
+// returns associative array with virtual memory stats
+std::unordered_map<std::string, uint64_t> vm_stats();
+
 // returns associative array with systemd service status
 std::unordered_map<std::string, std::string> systemd_service_status(const std::string &);
 
