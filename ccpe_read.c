@@ -1,9 +1,10 @@
 /*
  *
- * gcc -Wall ccpe_read.c -o ccpe_read -lssl -lcrypto -lm
+ * gcc -std=c11 -pedantic -Wall -Wextra -Werror ccpe_read.c -o ccpe_read -lssl -lcrypto -lm
  * Author: karol.wozniak@it.emca.pl
  *
  */
+#define _XOPEN_SOURCE 700 // POSIX 2008
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -17,6 +18,9 @@
 #include <errno.h>
 #include <openssl/ssl.h>
 #include <math.h>
+
+#define LOGERROR	1
+#define LOGINFO		0
 
 struct connectionDetails
 {
@@ -69,12 +73,6 @@ unsigned long getNoOfLines(const char *str)
 	}
 
 	return noOfLines;
-}
-
-unsigned long getNoOfChunks(const char *str, unsigned long max_lines_in_chunk)
-{
-	// +1 because of remainder
-	return 1 + (getNoOfLines(str) / max_lines_in_chunk);
 }
 
 // get number of chars in first number of lines including \n
@@ -161,12 +159,12 @@ void replaceCharInStr(char *str, int charToReplace, int charToReplaceWith)
 	}
 }
 
-void writeToLog(const char *filename, const char *message)
+void writeToLog(const char *filename, const char *message, unsigned int messageType)
 {
 	FILE *logFile = fopen(filename, "a");
 	if(logFile == NULL)
 	{
-		fprintf(stderr, "[Error] cannot open log file\n");
+		fprintf(stderr, "cannot open log file\n");
 		exit(EXIT_FAILURE);
 	}
 	struct tm *timeinfo;
@@ -175,22 +173,18 @@ void writeToLog(const char *filename, const char *message)
 	// stores time information
 	char time_buffer[20];
 
-	// stores message
-	char err_buffer[1024];
-	if(errno != 0)
-	{
-		perror(message);
-		snprintf(err_buffer, sizeof(err_buffer) - 1, "%s: %s", message, strerror(errno));
-	}
-	else
-	{
-		snprintf(err_buffer, sizeof(err_buffer) - 1, "%s", message);
-	}
-
 	timeinfo = localtime(&rawtime);
 	strftime(time_buffer, sizeof(time_buffer), "%d-%m-%Y %H:%M:%S", timeinfo);
 
-	fprintf(logFile, "%s: %s\n", time_buffer, err_buffer);
+	switch(messageType)
+	{
+		case 0:
+			fprintf(logFile, "%s: [INFO] %s\n", time_buffer, message);
+			break;
+		case 1:
+			fprintf(logFile, "%s: [ERROR] %s\n", time_buffer, message);
+			break;
+	}
 
 	fclose(logFile);
 }
@@ -199,11 +193,11 @@ int readConfig(const char *filename, const char *logfile, struct connectionDetai
 {
 	FILE *configFile = fopen(filename, "r");
 	if(configFile == NULL)
-        {
-		const char *msg = "[Error] cannot open config file";
-		writeToLog(logfile, msg);
+    {
+		const char *msg = "cannot open config file";
+		writeToLog(logfile, msg, LOGERROR);
 		return -1;
-        }
+    }
 	// initialize
 	memset(conn->host, 0, sizeof(conn->host));
 	memset(logstash->host, 0, sizeof(logstash->host));
@@ -281,21 +275,21 @@ int readConfig(const char *filename, const char *logfile, struct connectionDetai
 	// Throw an error if one of the element is not set
 	if((!strcmp(conn->host, "")) || (!strcmp(logstash->host, "")) || (conn->port == 0) || (logstash->port == 0))
 	{
-		const char *msg = "[Error] config file has incorrect formatting";
-                writeToLog(logfile, msg);
+		const char *msg = "config file has incorrect formatting";
+        writeToLog(logfile, msg, LOGERROR);
 		return -1;
 	}
 
 	char msg[1024];
-	snprintf(msg, sizeof(msg) - 1, "Read configuration file with the following content:\nserver.host: %s\nserver.port: %d\nlogstash.host: %s\nlogstash.port: %d\n", conn->host, conn->port, logstash->host, logstash->port);
-	writeToLog(logfile, msg);
+	snprintf(msg, sizeof(msg), "read configuration file with the following content:\nserver.host: %s\nserver.port: %d\nlogstash.host: %s\nlogstash.port: %d\n", conn->host, conn->port, logstash->host, logstash->port);
+	writeToLog(logfile, msg, LOGINFO);
 	fclose(configFile);
 	return 0;
 }
 
 // helper function to resolve hostname
 // returns 0 on error and IP in network byte order on success
-unsigned long hostnameToIP(const char *hostname, const char *logfile)
+unsigned long hostnameToIP(const char *hostname)
 {
 	struct addrinfo hints, *info;
 	struct sockaddr_in *s;
@@ -334,26 +328,26 @@ char *readResponse(const char *request, const struct connectionDetails *con, con
 
 	if((socket_descriptor = socket(AF_INET, SOCK_STREAM, 0)) == -1)
 	{
-		const char *msg = "[Error] could not create socket";
-		writeToLog(logfile, msg);
+		const char *msg = "could not create socket";
+		writeToLog(logfile, msg, LOGERROR);
 		return error_code;
 	}
 
 	memset(&server_info, 0, sizeof(server_info));
 	server_info.sin_family = AF_INET;
 	server_info.sin_port = htons(con->port);
-	if((server_info.sin_addr.s_addr = hostnameToIP(con->host, logfile)) == 0)
+	if((server_info.sin_addr.s_addr = hostnameToIP(con->host)) == 0)
 	{
-		const char *msg = "[Error] incorrect address was given";
-		writeToLog(logfile, msg);
+		const char *msg = "incorrect address was given";
+		writeToLog(logfile, msg, LOGERROR);
 		return error_code;
 	}
 	//printf("%s\n", inet_ntoa(server_info.sin_addr));
 	if(connect(socket_descriptor, (struct sockaddr *)&server_info, sizeof(server_info)) == -1)
 	{
 		char msg[1024];
-		snprintf(msg, sizeof(msg), "[Error] could not create connection to %s:%u", inet_ntoa(server_info.sin_addr), con->port);
-		writeToLog(logfile, msg);
+		snprintf(msg, sizeof(msg), "could not create connection to %s:%u", inet_ntoa(server_info.sin_addr), con->port);
+		writeToLog(logfile, msg, LOGERROR);
 		return error_code;
 	}
 
@@ -363,8 +357,8 @@ char *readResponse(const char *request, const struct connectionDetails *con, con
 		status = write(socket_descriptor, request, total);
 		if(status == -1)
 		{
-			const char *msg = "[Error] could not send data to socket";
-			writeToLog(logfile, msg);
+			const char *msg = "could not send data to socket";
+			writeToLog(logfile, msg, LOGERROR);
 			return error_code;
 		}
 	} while(status < total);
@@ -378,8 +372,8 @@ char *readResponse(const char *request, const struct connectionDetails *con, con
 			tmp = realloc(response, cur_size);
 			if(tmp == NULL)
 			{
-				const char *msg = "[Error] failed to reallocate memory";
-				writeToLog(logfile, msg);
+				const char *msg = "failed to reallocate memory";
+				writeToLog(logfile, msg, LOGERROR);
 				return error_code;
 			}
 
@@ -415,25 +409,25 @@ char *readSSLResponse(const char *request, const struct connectionDetails *con, 
 
 	if((socket_descriptor = socket(AF_INET, SOCK_STREAM, 0)) == -1)
 	{
-		const char *msg = "[Error] could not create socket";
-		writeToLog(logfile, msg);
+		const char *msg = "could not create socket";
+		writeToLog(logfile, msg, LOGERROR);
 		return error_code;
 	}
 
 	memset(&server_info, 0, sizeof(server_info));
 	server_info.sin_family = AF_INET;
 	server_info.sin_port = htons(con->port);
-	if((server_info.sin_addr.s_addr = hostnameToIP(con->host, logfile)) == 0)
+	if((server_info.sin_addr.s_addr = hostnameToIP(con->host)) == 0)
 	{
-		const char *msg = "[Error] incorrect address was given";
-		writeToLog(logfile, msg);
+		const char *msg = "incorrect address was given";
+		writeToLog(logfile, msg, LOGERROR);
 		return error_code;
 	}
 	if(connect(socket_descriptor, (struct sockaddr *)&server_info, sizeof(server_info)) == -1)
 	{
 		char msg[1024];
-		snprintf(msg, sizeof(msg), "[Error] could not create connection to %s:%u", inet_ntoa(server_info.sin_addr), con->port);
-		writeToLog(logfile, msg);
+		snprintf(msg, sizeof(msg), "could not create connection to %s:%u", inet_ntoa(server_info.sin_addr), con->port);
+		writeToLog(logfile, msg, LOGERROR);
 		return error_code;
 	}
 
@@ -445,30 +439,30 @@ char *readSSLResponse(const char *request, const struct connectionDetails *con, 
 	SSL_CTX *ssl_ctx; 
 	if((ssl_ctx = SSL_CTX_new(SSLv23_client_method())) == NULL)
 	{
-		const char *msg = "[Error] could not create new SSL context structure";
-		writeToLog(logfile, msg);
+		const char *msg = "could not create new SSL context structure";
+		writeToLog(logfile, msg, LOGERROR);
 		return error_code;
 	}
 
 	SSL *conn;
 	if((conn = SSL_new(ssl_ctx)) == NULL)
 	{
-		const char *msg = "[Error] could not create new SSL structure";
-                writeToLog(logfile, msg);
+		const char *msg = "could not create new SSL structure";
+                writeToLog(logfile, msg, LOGERROR);
                 return error_code;
 	}
 
 	if(SSL_set_fd(conn, socket_descriptor) == 0)
 	{
-		const char *msg = "[Error] could not set the socket descriptor for the encryption";
-		writeToLog(logfile, msg);
+		const char *msg = "could not set the socket descriptor for the encryption";
+		writeToLog(logfile, msg, LOGERROR);
 		return error_code;
 	}
 
 	if(SSL_connect(conn) != 1)
 	{
-		const char *msg = "[Error] could not complete SSL/TLS handshake";
-		writeToLog(logfile, msg);
+		const char *msg = "could not complete SSL/TLS handshake";
+		writeToLog(logfile, msg, LOGERROR);
 		return error_code;
 	}
 
@@ -479,8 +473,8 @@ char *readSSLResponse(const char *request, const struct connectionDetails *con, 
 		status = SSL_write(conn, request, total);
 		if(status <= 0)
 		{
-			const char *msg = "[Error] could not send data to ssl connection";
-			writeToLog(logfile, msg);
+			const char *msg = "could not send data to ssl connection";
+			writeToLog(logfile, msg, LOGERROR);
 			return error_code;
 		}
 	} while(status < total);
@@ -496,8 +490,8 @@ char *readSSLResponse(const char *request, const struct connectionDetails *con, 
 			tmp = realloc(response, cur_size);
 			if(tmp == NULL)
 			{
-				const char *msg = "[Error] failed to reallocate memory";
-				writeToLog(logfile, msg);
+				const char *msg = "failed to reallocate memory";
+				writeToLog(logfile, msg, LOGERROR);
 				return error_code;
 			}
 
@@ -533,25 +527,25 @@ int sendResponse(const char *response, const struct connectionDetails *con, cons
 
 	if((socket_descriptor = socket(AF_INET, SOCK_STREAM, 0)) == -1)
         {
-		const char *msg = "[Error] could not create socket";
-		writeToLog(logfile, msg);
+		const char *msg = "could not create socket";
+		writeToLog(logfile, msg, LOGERROR);
                 return error_code;
         }
 
         memset(&server_info, 0, sizeof(server_info));
         server_info.sin_family = AF_INET;
         server_info.sin_port = htons(con->port);
-	if((server_info.sin_addr.s_addr = hostnameToIP(con->host, logfile)) == 0)
+	if((server_info.sin_addr.s_addr = hostnameToIP(con->host)) == 0)
         {
-		const char *msg = "[Error] incorrect address was given";
-		writeToLog(logfile, msg);
+		const char *msg = "incorrect address was given";
+		writeToLog(logfile, msg, LOGERROR);
                 return error_code;
         }
         if(connect(socket_descriptor, (struct sockaddr *)&server_info, sizeof(server_info)) == -1)
         {
 		char msg[1024];
-		snprintf(msg, sizeof(msg), "[Error] could not create connection to %s:%u", inet_ntoa(server_info.sin_addr), con->port);
-		writeToLog(logfile, msg);
+		snprintf(msg, sizeof(msg), "could not create connection to %s:%u", inet_ntoa(server_info.sin_addr), con->port);
+		writeToLog(logfile, msg, LOGERROR);
                 return error_code;
         }
 
@@ -561,8 +555,8 @@ int sendResponse(const char *response, const struct connectionDetails *con, cons
                 status = write(socket_descriptor, response, total);
                 if(status == -1)
                 {
-			const char *msg = "[Error] could not send data to socket";
-			writeToLog(logfile, msg);
+			const char *msg = "could not send data to socket";
+			writeToLog(logfile, msg, LOGERROR);
                         return error_code;
                 }
         } while(status < total);
@@ -655,8 +649,8 @@ int sendZabbixResponse(struct connectionDetails *zabbix, struct connectionDetail
 	FILE *configFile = fopen(filename, "r");
 	if(configFile == NULL)
         {
-		const char *msg = "[Error] cannot open config file";
-		writeToLog(logfile, msg);
+		const char *msg = "cannot open config file";
+		writeToLog(logfile, msg, LOGERROR);
 		return -1;
         }
 
@@ -689,7 +683,7 @@ int sendZabbixResponse(struct connectionDetails *zabbix, struct connectionDetail
 	{
 		// prepare login request
 		char login_data[1024];
-		snprintf(login_data, sizeof(login_data) - 1, 
+		snprintf(login_data, sizeof(login_data), 
 		"{"
 		"\"jsonrpc\": \"2.0\","
 		"\"method\": \"user.login\","
@@ -702,7 +696,7 @@ int sendZabbixResponse(struct connectionDetails *zabbix, struct connectionDetail
 		"}", zabbix->user, zabbix->password);
 
 		// prepare request with headers
-		snprintf(zabbix_request, sizeof(zabbix_request)-1,
+		snprintf(zabbix_request, sizeof(zabbix_request),
 			"%s %s HTTP/1.0\r\n"
 			"Content-type: application/json\r\n"
 			"Content-length: %zu\r\n\r\n"
@@ -736,7 +730,7 @@ int sendZabbixResponse(struct connectionDetails *zabbix, struct connectionDetail
 
 	// prepare request with auth_token
 	char search_data[1024];
-	snprintf(search_data, sizeof(search_data)-1,
+	snprintf(search_data, sizeof(search_data),
 		"{"
 		"\"jsonrpc\": \"2.0\","
 		"\"method\": \"history.get\","
@@ -752,10 +746,10 @@ int sendZabbixResponse(struct connectionDetails *zabbix, struct connectionDetail
 		"\"id\": 1"
 		"}", item_id, auth_token);
 
-	writeToLog(logfile, search_data);
+	writeToLog(logfile, search_data, LOGINFO);
 
 	// prepare request with headers
-	snprintf(zabbix_request, sizeof(zabbix_request)-1,
+	snprintf(zabbix_request, sizeof(zabbix_request),
 		"%s %s HTTP/1.0\r\n"
 		"Content-type: application/json\r\n"
 		"Content-length: %zu\r\n\r\n"
@@ -766,7 +760,7 @@ int sendZabbixResponse(struct connectionDetails *zabbix, struct connectionDetail
 	if((response = readSSLResponse(zabbix_request, zabbix, logfile)) == NULL)
                 return error_code;
 
-	writeToLog(logfile, response);
+	writeToLog(logfile, response, LOGINFO);
 
 	parsed_response = remove_headers(&response);
 	//printf("%s\n", zabbix_request);
@@ -810,79 +804,17 @@ int sendZabbixResponse(struct connectionDetails *zabbix, struct connectionDetail
 	//printf("%s\n", result);
 	// LAST BYTE MUST BE NEWLINE OTHERWISE LOGSTASH HOLDS IT IN THE BUFFER
 	//printf("%s\n", result);
-	snprintf(result, sizeof(result) - 1, "{\"status\": %d, \"clock\": \"%s\"}\n", strtol(value, NULL, 0) == 0 ? 100 : 0, timestamp);
+	snprintf(result, sizeof(result), "{\"status\": %d, \"clock\": \"%s\"}\n", strtol(value, NULL, 0) == 0 ? 100 : 0, timestamp);
 	//printf("%s\n", result);
-	writeToLog(logfile, result);
+	writeToLog(logfile, result, LOGINFO);
 
 	if(sendResponse(result, logstash, logfile) != 0)
 		return error_code;
 
 	// Logging
 	char msg[100];
-	snprintf(msg, sizeof(msg) - 1, "Sending data from %s:%d to %s:%d", zabbix->host, zabbix->port, logstash->host, logstash->port);
-        writeToLog(logfile, msg);
-
-	free(response);
-	return 0;
-}
-
-int sendUcmdbResponse()
-{
-	const int error_code = -1;
-	const char *logfile = "/var/log/httpbeat/ucmdb.log";
-	const char *configfile = "/etc/httpbeat/ucmdb.conf";
-	struct connectionDetails ucmdb;
-	struct connectionDetails logstash;
-	char *response = NULL;
-	char msg[100];
-	char ucmdb_request[2048];
-	const char *method = "POST";
-	const char *path = "/axis2/services/UcmdbService?wsdl";
-	const char *base64auth = "YXBpdXNlcjo2dGdiJVRHQg==";
-	const char *data = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-	"<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\" xmlns:quer=\"http://schemas.hp.com/ucmdb/1/params/query\" xmlns:typ=\"http://schemas.hp.com/ucmdb/1/types\" xmlns:prop=\"http://schemas.hp.com/ucmdb/1/types/props\">"
-	"<soapenv:Header/>"
-	"<soapenv:Body>"
-	"<quer:executeTopologyQueryByNameWithParameters>"
-	"<quer:cmdbContext>"
-	"<typ:callerApplication>SOAPUI - SOAP_Sample_query_predefined_TQL</typ:callerApplication>"
-	"</quer:cmdbContext>"
-	"<quer:queryName>CIs per CFS</quer:queryName>"
-	"<quer:parameterizedNodes>"
-	"<typ:parameters>"
-	"<typ:strProps>"
-	"<typ:strProp>"
-	"<typ:name>pannet_cfs_id</typ:name>"
-	"<typ:value>0d28dc22-b318-3c47-a765-9dbd778d35c8</typ:value>"
-	"</typ:strProp>"
-	"</typ:strProps>"
-	"</typ:parameters>"
-	"<typ:nodeLabel>CFS</typ:nodeLabel>"
-	"</quer:parameterizedNodes>"
-	"</quer:executeTopologyQueryByNameWithParameters>"
-	"</soapenv:Body>"
-	"</soapenv:Envelope>";
-
-	snprintf(ucmdb_request, sizeof(ucmdb_request)-1,
-		"%s %s HTTP/1.0\r\n"
-		"Content-type: text/xml\r\n"
-		"Authorization: Basic %s\r\n"
-		"Content-length: %zu\r\n\r\n"
-		"%s", method, path, base64auth, strlen(data), data);
-
-	if(readConfig(configfile, logfile, &ucmdb, &logstash, 1) != 0)
-		return error_code;
-
-	if((response = readResponse(ucmdb_request, &ucmdb, logfile)) == NULL)
-		return error_code;
-
-	remove_headers(&response);
-	pretty_xml(&response);
-	if(sendResponse(response, &logstash, logfile) != 0)
-		return error_code;
-
-	snprintf(msg, sizeof(msg) - 1, "Sending data from %s:%d to %s:%d", ucmdb.host, ucmdb.port, logstash.host, logstash.port);
-	writeToLog(logfile, msg);
+	snprintf(msg, sizeof(msg), "sending data from %s:%d to %s:%d", zabbix->host, zabbix->port, logstash->host, logstash->port);
+        writeToLog(logfile, msg, LOGINFO);
 
 	free(response);
 	return 0;
@@ -978,7 +910,7 @@ int sendUcmdbInChunks(struct connectionDetails *ucmdb, struct connectionDetails 
 	//printf("%s\n", ucmdb_response);
 	if(getHttpStatus(ucmdb_response) != 200)
 	{
-		writeToLog(logfile, ucmdb_response);
+		writeToLog(logfile, ucmdb_response, LOGERROR);
 		free(ucmdb_response);
 		return error_code;
 	}
@@ -1010,7 +942,7 @@ int sendUcmdbInChunks(struct connectionDetails *ucmdb, struct connectionDetails 
 	*/
 
 	char chunk_request[2048];
-	int chunk_number; // helper variable used in loops
+	unsigned int chunk_number; // helper variable used in loops
 	int error_flag = 0; // after loop ends if this value is not equal to 0 it means we have not got all chunks
 	char *all_chunks[noOfChunks]; // array of pointers to all formatted chunks gathered in loop
 	char *raw_chunks[noOfChunks]; // array of pointers to all pretty xml chunks gathered in loop
@@ -1071,7 +1003,7 @@ int sendUcmdbInChunks(struct connectionDetails *ucmdb, struct connectionDetails 
 			}
 			if(getHttpStatus(raw_chunks[chunk_number]) != 200)
 			{
-				writeToLog(logfile, raw_chunks[chunk_number]);
+				writeToLog(logfile, raw_chunks[chunk_number], LOGERROR);
 				error_flag = error_code;
 				break;
 			}
@@ -1086,7 +1018,8 @@ int sendUcmdbInChunks(struct connectionDetails *ucmdb, struct connectionDetails 
 
 		// array of pointers to dynamically allocated memory containing chunks
 		const unsigned long max_lines_in_chunk = 5000;
-		const unsigned long numberOfChunks = getNoOfChunks(raw_chunks[chunk_number], max_lines_in_chunk);
+		// +1 because of remainder
+		const unsigned long numberOfChunks = 1 + getNoOfLines(raw_chunks[chunk_number]) / max_lines_in_chunk;
 		// extract number of documents
 		noOfDocs += numberOfChunks;
 		char *ptrToChunks[numberOfChunks];
@@ -1143,35 +1076,11 @@ int sendUcmdbInChunks(struct connectionDetails *ucmdb, struct connectionDetails 
 	strncpy(elasticsearch.host, "100.127.111.14", sizeof(elasticsearch.host));
 	elasticsearch.port = 9200;
 
-	/*
-	// EXPECTED OK RESPONSE FROM ELASTICSEARCH
-	const char *expected_response = "{\"acknowledged\":true}";
-
-	// DELETE INDEX ALIAS
-	const char *alias_data = "{\"actions\" : [{\"remove\" : {\"index\" : \"ucmdb\",\"alias\" : \"vucmdb\"}}]}";
-	char alias_request[1024];
-
-	snprintf(alias_request, sizeof(alias_request),
-	"POST /_aliases HTTP/1.0\r\n"
-	"Content-type: application/json\r\n"
-	"Content-length: %zu\r\n\r\n"
-	"%s", strlen(alias_data), alias_data);
-	char *alias_response = NULL;
-	do {
-		free(alias_response);
-		if((alias_response = readResponse(alias_request, &elasticsearch, logfile)) == NULL)
-			return error_code;
-	} while(strstr(alias_response, expected_response) == NULL);
-
-	//printf("%s\n", alias_response);
-	free(alias_response);
-	*/
-
 	const char *expected_response;
 	expected_response = "index_not_found_exception"; // index is deleted if we get this message
 
 	/*** DELETE OLD UCMDB INDEX ***/
-	writeToLog(logfile, "Deleting old ucmdb index...");
+	writeToLog(logfile, "deleting old ucmdb index...", LOGINFO);
 	const char *delete_request = "DELETE /ucmdb HTTP/1.0\r\n"
 					"Authorization: Basic bG9nc2VydmVyOmxvZ3NlcnZlcg==\r\n" //logserver:logserver
 					"Content-length: 0\r\n\r\n";
@@ -1183,13 +1092,13 @@ int sendUcmdbInChunks(struct connectionDetails *ucmdb, struct connectionDetails 
 	} while(strstr(delete_response, expected_response) == NULL);
 	//printf("%s\n", delete_response);
 	free(delete_response);
-	writeToLog(logfile, "Index deleted");
+	writeToLog(logfile, "index deleted", LOGINFO);
 
 	/*** SEND NEW DATA TO LOGSTASH 
 	 * NO IDEA WHEN ALL DATA WILL BE AVAILABLE IN ELASTICSEARCH
 	***/
-	snprintf(msg, sizeof(msg), "Sending chunks from %s:%d to %s:%d...", ucmdb->host, ucmdb->port, logstash->host, logstash->port);
-	writeToLog(logfile, msg);
+	snprintf(msg, sizeof(msg), "sending chunks from %s:%d to %s:%d...", ucmdb->host, ucmdb->port, logstash->host, logstash->port);
+	writeToLog(logfile, msg, LOGINFO);
 	for(chunk_number = 0; chunk_number < noOfChunks; chunk_number++)
 	{
 		if(sendResponse(all_chunks[chunk_number], logstash, logfile) != 0)
@@ -1199,12 +1108,12 @@ int sendUcmdbInChunks(struct connectionDetails *ucmdb, struct connectionDetails 
 		free(all_chunks[chunk_number]);
 		free(raw_chunks[chunk_number]);
 	}
-	snprintf(msg, sizeof(msg), "Chunks sent in total: %d", noOfChunks);
-	writeToLog(logfile, msg);
+	snprintf(msg, sizeof(msg), "chunks sent in total: %d", noOfChunks);
+	writeToLog(logfile, msg, LOGINFO);
 
 	// Wait for all documents to get indexed in elasticsearch
-	snprintf(msg, sizeof(msg), "Waiting for %lu documents to get indexed in elasticsearch...", noOfDocs);
-	writeToLog(logfile, msg);
+	snprintf(msg, sizeof(msg), "waiting for %lu documents to get indexed in elasticsearch...", noOfDocs);
+	writeToLog(logfile, msg, LOGINFO);
 
 	// Wait until elasticsearch responds with message containing count
 	const char *count_str = "\"count\"";
@@ -1229,7 +1138,7 @@ int sendUcmdbInChunks(struct connectionDetails *ucmdb, struct connectionDetails 
 	do {
 		sleep(interval);
 		/*** copy string from count from "count" to the nearest "," char to count_buffer ***/
-		int i = 0;
+		unsigned int i = 0;
 		while(*count != ',' && i < sizeof(count_buffer) - 1)
 		{
 			count_buffer[i] = *count;
@@ -1256,14 +1165,14 @@ int sendUcmdbInChunks(struct connectionDetails *ucmdb, struct connectionDetails 
 	snprintf(expected_count, sizeof(expected_count), "\"count\":%lu", noOfDocs);
 	if(strstr(count_buffer, expected_count) == NULL)
 	{
-		snprintf(msg, sizeof(msg), "Timeout reached, received the following count: %s", count_buffer);
-		writeToLog(logfile, msg);
+		snprintf(msg, sizeof(msg), "timeout reached, received the following count: %s", count_buffer);
+		writeToLog(logfile, msg, LOGERROR);
 		return error_code;
 	}
-	writeToLog(logfile, "All documents got indexed");
+	writeToLog(logfile, "all documents got indexed", LOGINFO);
 
 	// CREATE INDEX ALIAS
-	writeToLog(logfile, "Creating vucmdb index alias...");
+	writeToLog(logfile, "creating vucmdb index alias...", LOGINFO);
 	expected_response = "{\"acknowledged\":true}";
 	char elastic_data[1024];
 	char elastic_request[1024];
@@ -1285,28 +1194,10 @@ int sendUcmdbInChunks(struct connectionDetails *ucmdb, struct connectionDetails 
 
 	//printf("%s\n", elastic_response);
 	free(elastic_response);
-	writeToLog(logfile, "Alias created");
+	writeToLog(logfile, "alias created", LOGINFO);
 
 	return 0;
 }
-
-/*
- * TODO
-int sendCcpeResponse()
-{
-	const int error_code = -1;
-	const char *logfile = "ccpe.log";
-	const char *configfile = "ccpe.conf";
-	struct connectionDetails ccpe;
-	struct connectionDetails logstash;
-	char *response = NULL;
-	char msg[100];
-	char ccpe_request[2048];
-	const char *method = "POST";
-	const char *path = "/axis2/services/UcmdbService?wsdl";
-	const char *base64auth = "YXBpdXNlcjo2dGdiJVRHQg==";
-}
-*/
 
 int main(int argc, char *argv[])
 {
@@ -1325,14 +1216,14 @@ int main(int argc, char *argv[])
 		// Read ucmdb config file
 		struct connectionDetails ucmdb;
 		struct connectionDetails ucmdb_logstash;
-		const char *ucmdb_log = "ucmdb.log";
+		const char *ucmdb_log = "/var/log/httpbeat/ucmdb.log";
 		const char *ucmdb_config = "/etc/httpbeat/ucmdb.conf";
 
 		if(readConfig(ucmdb_config, ucmdb_log, &ucmdb, &ucmdb_logstash, 1) != 0)
 			return -1;
 
-		//for(;;)
-		//{
+		for(;;)
+		{
 			if(sendUcmdbInChunks(&ucmdb, &ucmdb_logstash, ucmdb_log) != 0)
 			{
 				fprintf(stderr, "UCMDB function exited with error code\n");
@@ -1340,8 +1231,8 @@ int main(int argc, char *argv[])
 			}
 
 
-		//	sleep(300);
-		//}
+			sleep(300);
+		}
 
 		// Deallocate resources
 		free(ucmdb.base64);
@@ -1351,7 +1242,7 @@ int main(int argc, char *argv[])
 		// Read zabbix config file
 		struct connectionDetails zabbix;
 		struct connectionDetails zabbix_logstash;
-		const char *zabbix_log = "zabbix.log";
+		const char *zabbix_log = "/var/log/httpbeat/zabbix.log";
 		const char *zabbix_config = "/etc/httpbeat/zabbix.conf";
 
 
@@ -1360,13 +1251,6 @@ int main(int argc, char *argv[])
 
 		for(;;)
 		{
-			/*
-			if(sendUcmdbResponse() != 0)
-			{
-				fprintf(stderr, "UCMDB function exited with error code\n");
-				return -1;
-			}
-			*/
 			if(sendZabbixResponse(&zabbix, &zabbix_logstash, zabbix_log, zabbix_config) != 0)
 			{
 				fprintf(stderr, "ZABBIX function exited with error code\n");
