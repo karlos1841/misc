@@ -1,5 +1,11 @@
+/*
+ * g++ -std=c++11 -pedantic -Wall -Wextra -Werror sm_selfmonitoring.cpp -o sm_selfmonitoring
+ * Author: karol.wozniak@it.emca.pl
+ *
+*/
 #define _XOPEN_SOURCE 700 // POSIX 2008
 #include <iostream>
+#include <vector>
 #include <cstdio>
 #include <cstring>
 #include <climits>
@@ -46,7 +52,7 @@ std::unordered_map<std::string, uint64_t> cpu_stats();
 std::unordered_map<std::string, uint64_t> vm_stats();
 
 // returns associative array with systemd service status
-std::unordered_map<std::string, std::string> systemd_service_status(const std::string &);
+std::unordered_map<std::string, std::string> systemd_service_status(const std::string &, bool);
 
 /********************************/
 /********************************/
@@ -267,7 +273,7 @@ int sendData(const char *data, const char *host, unsigned short port)
 	return 0;
 }
 
-int sendDataToElasticsearch(const std::string &data, const char *index, const char *host, unsigned short port)
+int sendDataToElasticsearch(const std::string &data, const std::string &index, const std::string &type, const char *host, unsigned short port)
 {
     // ISO8601 UTC timestamp
 	struct tm *timeinfo;
@@ -280,7 +286,7 @@ int sendDataToElasticsearch(const std::string &data, const char *index, const ch
     std::string elastic_data = data_str + ",\"@timestamp\": " + "\"" + timestamp + "\"}\n";
 
 
-    std::string elastic_request = "POST /" + std::string(index) + "/" + std::string(index) + " HTTP/1.0\r\n" +
+    std::string elastic_request = "POST /" + index + "/" + type + " HTTP/1.0\r\n" +
 	"Content-type: application/json\r\n" +
     "Authorization: Basic bG9nc2VydmVyOmxvZ3NlcnZlcg==\r\n" +
 	"Content-length: " + std::to_string(elastic_data.size()) + "\r\n\r\n" +
@@ -465,8 +471,10 @@ int Node::master_node_ip()
 class ClusterStats : private Node
 {
     const char *api_response;
+    const char *api_health_response;
 
     std::unordered_map<std::string, uint64_t> api_stats();
+    std::unordered_map<std::string, float> api_health();
 
     public:
     ClusterStats()
@@ -476,20 +484,39 @@ class ClusterStats : private Node
 
         const char *elastic_request = "GET /_cluster/stats HTTP/1.0\r\n\r\n";
         api_response = readResponse(elastic_request, elasticsearchIP, elasticsearchPort);
-        if(api_response == NULL)
+	elastic_request = "GET /_cluster/health HTTP/1.0\r\n\r\n";
+	api_health_response = readResponse(elastic_request, elasticsearchIP, elasticsearchPort);
+        if(api_response == NULL || api_health_response == NULL)
             throw std::runtime_error("Failed to construct ClusterStats object: NULL response");
     };
-    ~ClusterStats(){free((char *)api_response);};
+    ~ClusterStats(){free((char *)api_response); free((char *)api_health_response);};
 
     std::string get_api_stats()
     {
         std::string json_output;
-        json_output = json_output + api_timestamp(api_response) + hostname_ip() + api_stats();
+        json_output = json_output + api_timestamp(api_response) + hostname_ip() + api_stats() + api_health();
 
         return json_output;
     };
 };
 
+std::unordered_map<std::string, float> ClusterStats::api_health()
+{
+    std::unordered_map<std::string, float> stats;
+    if(getHttpStatus(api_health_response) != 200) return stats;
+    api_health_response = remove_headers((char **)&api_health_response);
+
+    const char *value = NULL;
+    union Key{const char *key[1];};
+    Key key;
+
+    key = {"active_shards_percent_as_number\":"};
+    if((value = extract_json_value(api_health_response, key.key, 1)) == NULL) return stats;
+    float availability = strtof(value, NULL);
+    stats.insert({"cluster_stats_availability", availability});
+
+    return stats;
+}
 std::unordered_map<std::string, uint64_t> ClusterStats::api_stats()
 {
     std::unordered_map<std::string, uint64_t> stats;
@@ -1349,67 +1376,176 @@ std::unordered_map<std::string, uint64_t> vm_stats()
     return vm;
 }
 
-std::unordered_map<std::string, std::string> systemd_service_status(const std::string &service)
+std::unordered_map<std::string, std::string> systemd_service_status(const std::string &service, bool skip_unknown = true)
 {
     std::unordered_map<std::string, std::string> service_status;
     std::string status;
-    if(getCommandOutput("systemctl is-active " + service, status) != -1) service_status.insert({"node_stats_systemd_service_" + service, status});
+    if(getCommandOutput("systemctl is-active " + service, status) != -1)
+    {
+	if(skip_unknown)
+	{
+		if(status != "unknown") service_status.insert({"node_stats_systemd_service_" + service, status});
+	}
+	else
+	{
+		service_status.insert({"node_stats_systemd_service_" + service, status});
+	}
+    }
 
     return service_status;
+}
+
+std::unordered_map<std::string, std::string> is_address_in_use(const std::string &ip, const int port, bool skip_unused = true)
+{
+	std::unordered_map<std::string, std::string> port_status;
+	int socket_descriptor;
+	struct sockaddr_in server_info;
+
+	if((socket_descriptor = socket(AF_INET, SOCK_STREAM, 0)) == -1)
+	{
+		//const char *msg = "[Error] could not create socket";
+		return port_status;
+	}
+
+	memset(&server_info, 0, sizeof(server_info));
+	server_info.sin_family = AF_INET;
+	server_info.sin_port = htons(port);
+	if((server_info.sin_addr.s_addr = hostnameToIP(ip.c_str())) == 0)
+	{
+		//const char *msg = "[Error] incorrect address was given";
+		return port_status;
+	}
+	errno = 0;
+	bind(socket_descriptor, (struct sockaddr *)&server_info, sizeof(server_info));
+	switch(errno)
+	{
+		case 0:
+			if(!skip_unused)
+				port_status.insert({"node_stats_tcp_port_" + std::to_string(port), "unused"});
+		break;
+		case EADDRINUSE:
+			port_status.insert({"node_stats_tcp_port_" + std::to_string(port), "in_use"});
+		break;
+	}
+
+	close(socket_descriptor);
+	return port_status;
 }
 /********* END OF OS FUNCTIONS *********/
 /***************************************/
 /***************************************/
 
+void appendDateNow(std::string &arg)
+{
+	struct tm *timeinfo;
+	time_t rawtime = time(NULL);
+	char timestamp[20];
+	timeinfo = gmtime(&rawtime);
+	strftime(timestamp, sizeof(timestamp), "%Y.%m.%d", timeinfo);
+	arg = arg + "-" + timestamp;
+}
+
+void printHelp()
+{
+	std::cerr << "help" << std::endl;
+}
+
 int main(int argc, char *argv[])
 {
-    if(argc != 2)
+    std::string indexName, indexType;
+    int opt;
+    std::vector<std::string> systemdS;
+    std::vector<int> portInUse;
+    bool daemonize = false;
+    while((opt = getopt(argc, argv, "hdi:s:p:")) != -1)
     {
-        std::cerr << "Please pass index name as an argument" << std::endl;
-        return -1;
+	switch(opt)
+	{
+		case 'h':
+			printHelp();
+			return -1;
+		break;
+		case 'd':
+			daemonize = true;
+		break;
+		case 'i':
+			indexName = indexType = optarg;
+		break;
+		case 's':
+			{
+				std::string arg(optarg);
+				std::istringstream iss(arg);
+				std::string token;
+				while(std::getline(iss, token, ','))
+					systemdS.push_back(token);
+			}
+		break;
+		case 'p':
+			{
+				std::string arg(optarg);
+				std::istringstream iss(arg);
+				std::string token;
+				while(std::getline(iss, token, ','))
+				{
+					try
+					{
+						portInUse.push_back(std::stoi(token));
+					}
+					catch(const std::invalid_argument& err)
+					{
+						std::cerr << "Invalid argument in -p option: " << err.what() <<std::endl;
+						return -1;
+					}
+				}
+			}
+		break;
+		default:
+			printHelp();
+			return -1;
+	}
     }
+
+    if(indexName.empty())
+    {
+	std::cerr << "Index name must be set. Use -h to see help" << std::endl;
+	return -1;
+    }
+
     // child code
-    //if(fork() == 0)
-    //{
-        //for(;;)
-        //{
+    if(fork() == 0)
+    {
+	appendDateNow(indexName);
+
+       	do
+        {
             // Stats common for all nodes
-            std::string os_stats;
-            os_stats = os_stats + hostname_ip() + fs_stats() + swap_stats() +
-                        process_pid("sshd") + process_pid("syslogd") +
-                        zombie_count() + cpu_stats() + net_stats() + vm_stats();
-
-            /*** Stats specific to a node for a specific environment
-             *   Feel free to remove
-             ***/
             std::string ip = hostname_ip()["source_node_ip"];
-            if(ip == "100.127.111.14" || ip == "100.127.111.15" || ip == "100.127.111.16")
-            {
-                os_stats = os_stats + systemd_service_status("elasticsearch") + systemd_service_status("logstash") + systemd_service_status("metricbeat") +
-                            systemd_service_status("pacemaker") + systemd_service_status("pcsd") + systemd_service_status("corosync") +
-                            systemd_service_status("kpi_raw_generator");
-            }
-            else if(ip == "10.235.0.22" || ip == "10.235.0.23" || ip == "10.235.0.24")
-            {
-                os_stats = os_stats + systemd_service_status("kafka") + systemd_service_status("zookeeper") + systemd_service_status("httpbeat") +
-                            systemd_service_status("logstash") + systemd_service_status("metricbeat") + systemd_service_status("ccpe") +
-                            systemd_service_status("ucmdb") + systemd_service_status("zabbix");
-            }
-            else if(ip == "10.235.0.19" || ip == "10.235.0.20")
-            {
-                os_stats = os_stats + systemd_service_status("kibana") + systemd_service_status("elastalert") + systemd_service_status("elasticsearch") +
-                            systemd_service_status("metricbeat") + systemd_service_status("pacemaker") + systemd_service_status("pcsd") +
-                            systemd_service_status("corosync");
-            }
-            /*** END ***/
-
+            std::string os_stats;
+            os_stats = os_stats + hostname_ip() + zombie_count();
+			// + fs_stats() + swap_stats() +
+                        //process_pid("sshd") + process_pid("syslogd") +
+                        //zombie_count() + cpu_stats() + net_stats() + vm_stats() +
+			//systemd_service_status("elasticsearch") + systemd_service_status("logstash") +
+			//systemd_service_status("metricbeat") + systemd_service_status("pacemaker") + systemd_service_status("pcsd") +
+			//systemd_service_status("corosync") + systemd_service_status("kpi_raw_generator") + systemd_service_status("kafka") +
+			//systemd_service_status("zookeeper") + systemd_service_status("httpbeat") + systemd_service_status("ccpe") +
+			//systemd_service_status("ucmdb") + systemd_service_status("zabbix") + systemd_service_status("kibana") +
+			//systemd_service_status("elastalert") +
+	    for(const std::string &str: systemdS)
+	    {
+		os_stats = os_stats + systemd_service_status(str);
+	    }
+	    for(int port: portInUse)
+	    {
+		os_stats = os_stats + is_address_in_use(ip, port);
+	    }
             try
             {
                 NodeStats node;
 
                 //std::cout << node.get_api_stats() << std::endl;
-                sendDataToElasticsearch(node.get_api_stats(), argv[1], "127.0.0.1", 9200);
-                sendDataToElasticsearch(os_stats, argv[1], "127.0.0.1", 9200);
+                sendDataToElasticsearch(node.get_api_stats(), indexName, indexType, "127.0.0.1", 9200);
+                sendDataToElasticsearch(os_stats, indexName, indexType, "127.0.0.1", 9200);
             }
             catch(const std::runtime_error &error)
             {
@@ -1425,15 +1561,16 @@ int main(int argc, char *argv[])
                 ClusterStats cluster;
 
                 //std::cout << cluster.get_api_stats() << std::endl;
-                sendDataToElasticsearch(cluster.get_api_stats(), argv[1], "127.0.0.1", 9200);
+                sendDataToElasticsearch(cluster.get_api_stats(), indexName, indexType, "127.0.0.1", 9200);
             }
             catch(const std::runtime_error &error)
             {
                 std::cerr << error.what() << std::endl;
             }
-            //sleep(60);
-        //}
-    //}
+	    if(daemonize)
+          	  sleep(60);
+        } while(daemonize);
+    }
 
     // orphaning child
     return 0;
