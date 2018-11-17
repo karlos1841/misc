@@ -164,7 +164,7 @@ const char *open_file(const char *file_path)
     fsize = ftell(f);
     rewind(f);
 
-    fcontent = calloc(fsize + 1, 1);
+    if((fcontent = calloc(fsize + 1, 1)) == NULL) return NULL;
     if(fread(fcontent, 1, fsize, f) != fsize) return NULL;
 
     return fcontent;
