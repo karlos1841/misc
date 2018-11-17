@@ -15,7 +15,8 @@ void calculation(const char *buf)
     static int mpoll2[4][10];
     static int kpoll1[5][10];
     static int kpoll2[4][10];
-    const char *payload = strstr(buf, "\r\n\r\n");
+    const char *payload = NULL;
+    if((payload = strstr(buf, "\r\n\r\n")) == NULL) return;
     payload += 4;
     int index;
     if(*payload != '\0')
