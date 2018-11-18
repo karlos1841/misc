@@ -218,7 +218,7 @@ int send_page(int fd, const char *buf)
         if((page = open_file("/root/index.html")) == NULL) return -1;
         char response[strlen(page) + 1024];
         snprintf(response, sizeof(response),
-        "HTTP/1.1 200 OK\r\nServer: karol\r\nContent-Length: %zu\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n%s",
+        "HTTP/1.1 200 OK\r\nServer: karol\r\nCache-Control: no-cache, no-store, must-revalidate\r\nContent-Length: %zu\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n%s",
         strlen(page), page);
         write(fd, response, strlen(response));
         //printf("%s\n", response);
@@ -232,7 +232,7 @@ int send_page(int fd, const char *buf)
         if((page = open_file("/root/index2.html")) == NULL) return -1;
         char response[strlen(page) + 1024];
         snprintf(response, sizeof(response),
-        "HTTP/1.1 200 OK\r\nServer: karol\r\nContent-Length: %zu\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n%s",
+        "HTTP/1.1 200 OK\r\nServer: karol\r\nCache-Control: no-cache, no-store, must-revalidate\r\nContent-Length: %zu\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n%s",
         strlen(page), page);
         write(fd, response, strlen(response));
         //printf("%s\n", response);
