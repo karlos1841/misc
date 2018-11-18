@@ -215,10 +215,10 @@ int send_page(int fd, const char *buf)
     if(!strcmp(uri, "/"))
     {
         const char *page;
-        if((page = open_file("index.html")) == NULL) return -1;
+        if((page = open_file("/root/index.html")) == NULL) return -1;
         char response[strlen(page) + 1024];
         snprintf(response, sizeof(response),
-        "HTTP/1.1 200 OK\r\nServer: karol\r\nAccept-Ranges: bytes\r\nContent-Length: %zu\r\nContent-Type: text/html\r\n\r\n%s",
+        "HTTP/1.1 200 OK\r\nServer: karol\r\nContent-Length: %zu\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n%s",
         strlen(page), page);
         write(fd, response, strlen(response));
         //printf("%s\n", response);
@@ -229,14 +229,19 @@ int send_page(int fd, const char *buf)
     else if(!strcmp(uri, "/index2.html"))
     {
         const char *page;
-        if((page = open_file("index2.html")) == NULL) return -1;
+        if((page = open_file("/root/index2.html")) == NULL) return -1;
         char response[strlen(page) + 1024];
         snprintf(response, sizeof(response),
-        "HTTP/1.1 200 OK\r\nServer: karol\r\nAccept-Ranges: bytes\r\nContent-Length: %zu\r\nContent-Type: text/html\r\n\r\n%s",
+        "HTTP/1.1 200 OK\r\nServer: karol\r\nContent-Length: %zu\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n%s",
         strlen(page), page);
         write(fd, response, strlen(response));
         //printf("%s\n", response);
         close_file(page);
+    }
+    else
+    {
+        const char *response = "HTTP/1.1 404 Not Found\r\nServer: karol\r\nConnection: close\r\n\r\n";
+        write(fd, response, strlen(response));
     }
 
     return 0;
