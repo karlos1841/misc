@@ -8,6 +8,7 @@
 #include <vector>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <climits>
 #include <unordered_map>
 #include <sstream>
@@ -1372,7 +1373,7 @@ std::unordered_map<std::string, uint64_t> vm_stats()
         if(i == 0) nanosleep(&req, &rem);
     }
 
-    vm.insert({"node_stats_pgpgout_in_kilobytes_per_sec", value[1] - value[0]});
+    vm.insert({"node_stats_pgpgout_per_sec", value[1] - value[0]});
     return vm;
 }
 
@@ -1435,6 +1436,24 @@ std::unordered_map<std::string, std::string> is_address_in_use(const std::string
 /***************************************/
 /***************************************/
 
+int writeToLog(const char *filename, const char *message)
+{
+        FILE *logFile = fopen(filename, "a");
+        if(logFile == NULL){fprintf(stderr, "cannot open log file\n");return -1;}
+        struct tm *timeinfo;
+        time_t rawtime = time(NULL);
+
+        // stores time information
+        char time_buffer[20];
+
+        timeinfo = localtime(&rawtime);
+        strftime(time_buffer, sizeof(time_buffer), "%d-%m-%Y %H:%M:%S", timeinfo);
+        fprintf(logFile, "%s: %s\n", time_buffer, message);
+
+        fclose(logFile);
+        return 0;
+}
+
 void appendDateNow(std::string &arg)
 {
 	struct tm *timeinfo;
@@ -1445,19 +1464,160 @@ void appendDateNow(std::string &arg)
 	arg = arg + "-" + timestamp;
 }
 
+int isFileCsv(const char *filePath, const char *delim)
+{
+        const int exit_failure = -1;
+        const int exit_success = 0;
+        std::ifstream file;
+        std::string line, content;
+        file.open(filePath);
+        if(!file.good()) return exit_failure;
+        while(std::getline(file, line))
+        {
+            content += line;
+        }
+        file.close();
+        const char *str = content.c_str();
+
+
+        char *next_line = (char *)str;
+        size_t line_size = 0;
+        // one column without delim
+        unsigned column_num_ref = 1;
+
+        while(*next_line != '\0')
+        {
+                line_size = strcspn(next_line, "\n");
+                // line buffer contains the line without trailing '\n'
+                char *const line_buffer = (char *)calloc(line_size + 1, sizeof(char));
+                snprintf(line_buffer, line_size + 1, "%s", next_line);
+                // count number of columns
+                unsigned column_num = 1;
+                int i = 0;
+                while(line_buffer[i] != '\0')
+                {
+                        if(line_buffer[i] == *delim)
+                                column_num += 1;
+
+                        i += 1;
+                }
+                if(column_num == 1)
+                        return exit_failure;
+
+                // the first line is reference
+                if(column_num_ref == 1)
+                        column_num_ref = column_num;
+                if(column_num != column_num_ref)
+                        return exit_failure;
+                // pointer to the beginning of the next line
+                next_line = next_line + line_size + 1;
+
+                free(line_buffer);
+        }
+
+        return exit_success;
+}
+
+// -1 cannot open file
+// 1 file empty
+// 0 file exists and not empty
+int isFileEmpty(const char *filename)
+{
+    FILE *f = NULL;
+    unsigned long fsize = 0;
+    if((f = fopen(filename, "rb")) == NULL) return -1;
+    fseek(f, 0, SEEK_END);
+    fsize = ftell(f);
+    fclose(f);
+
+    if(fsize == 0) return 1;
+    return 0;
+}
+
+int checkNextCsv(const char *csvDir, const char *logFile)
+{
+    bool found;
+    std::string csvPath;
+    static std::vector<std::string> csvList;
+    DIR *dir;
+    struct dirent *ent;
+    if((dir = opendir(csvDir)) == NULL) return -1;
+
+    while((ent = readdir(dir)) != NULL)
+    {
+        if(ent->d_type != DT_REG) continue;
+        found = false;
+        for(const std::string &tmp: csvList)
+        {
+            if(tmp == ent->d_name)
+            {
+                found = true;
+                break;
+            }
+        }
+        if(found == false)
+        {
+            csvList.push_back(ent->d_name);
+            std::string msg;
+            csvPath = std::string(csvDir) + "/" + std::string(ent->d_name);
+            switch (isFileEmpty(csvPath.c_str()))
+            {
+                case -1:
+                    msg = "Cannot open file: " + std::string(ent->d_name);
+                    writeToLog(logFile, msg.c_str());
+                break;
+                case 0:
+                    if(isFileCsv(csvPath.c_str(), ",") == -1)
+                    {
+                        msg = "File is not csv: " + std::string(ent->d_name);
+                        writeToLog(logFile, msg.c_str());
+                    }
+                    else
+                    {
+                        msg = "File is csv: " + std::string(ent->d_name);
+                        writeToLog(logFile, msg.c_str());
+                    }
+                break;
+                case 1:
+                    msg = "File is empty: " + std::string(ent->d_name);
+                    writeToLog(logFile, msg.c_str());
+                break;
+            }
+        }
+    }
+
+    closedir(dir);
+    return 0;
+}
+
 void printHelp()
 {
-	std::cerr << "help" << std::endl;
+	std::cout << "Usage for skimmer version 1.0" << std::endl;
+    std::cout << "\tGeneral Options:" << std::endl;
+    std::cout << "\t\t-h print this help message" << std::endl;
+    std::cout << "\t\t-d daemonize" << std::endl;
+    std::cout << "\t\t-i [required] index name in elasticsearch" << std::endl;
+    std::cout << "\t\t-t [default=_doc] index type in elasticsearch" << std::endl;
+    std::cout << "\t\t-l [default=/tmp/skimmer.log] path to log file" << std::endl;
+    std::cout << "\tMonitoring Options:" << std::endl;
+    std::cout << "\t\t-o [zombie,process(process_name),vm,fs,swap,net,cpu] comma separated OS statistics selected from the list" << std::endl;
+    std::cout << "\t\t-s comma separated systemd services to check their status" << std::endl;
+    std::cout << "\t\t-p comma separated ports to check if they are in use" << std::endl;
+    std::cout << "\t\t-c path to directory containing files needed to be csv validated" << std::endl;
 }
 
 int main(int argc, char *argv[])
 {
-    std::string indexName, indexType;
+    std::string indexName;
+    std::string indexType = "_doc";
+    const char *csvDir = NULL;
+    const char *logFile = "/tmp/skimmer.log";
     int opt;
     std::vector<std::string> systemdS;
+    std::vector<std::string> os;
     std::vector<int> portInUse;
     bool daemonize = false;
-    while((opt = getopt(argc, argv, "hdi:s:p:")) != -1)
+    while((opt = getopt(argc, argv, "hdi:t:l:o:s:p:c:")) != -1)
     {
 	switch(opt)
 	{
@@ -1469,8 +1629,23 @@ int main(int argc, char *argv[])
 			daemonize = true;
 		break;
 		case 'i':
-			indexName = indexType = optarg;
+			indexName = optarg;
 		break;
+        case 't':
+            indexType = optarg;
+        break;
+        case 'l':
+            logFile = optarg;
+        break;
+        case 'o':
+            {
+                std::string arg(optarg);
+                std::istringstream iss(arg);
+                std::string token;
+                while(std::getline(iss, token, ','))
+                    os.push_back(token);
+            }
+        break;
 		case 's':
 			{
 				std::string arg(optarg);
@@ -1499,46 +1674,72 @@ int main(int argc, char *argv[])
 				}
 			}
 		break;
+        case 'c':
+            csvDir = optarg;
+        break;
 		default:
 			printHelp();
 			return -1;
 	}
     }
 
+    // options that must be set
     if(indexName.empty())
     {
-	std::cerr << "Index name must be set. Use -h to see help" << std::endl;
-	return -1;
+	    std::cerr << "Index name must be set. Use -h to see help" << std::endl;
+	    return -1;
     }
 
     // child code
     if(fork() == 0)
     {
-	appendDateNow(indexName);
+	    appendDateNow(indexName);
 
        	do
         {
             // Stats common for all nodes
             std::string ip = hostname_ip()["source_node_ip"];
             std::string os_stats;
-            os_stats = os_stats + hostname_ip() + zombie_count();
-			// + fs_stats() + swap_stats() +
-                        //process_pid("sshd") + process_pid("syslogd") +
-                        //zombie_count() + cpu_stats() + net_stats() + vm_stats() +
-			//systemd_service_status("elasticsearch") + systemd_service_status("logstash") +
-			//systemd_service_status("metricbeat") + systemd_service_status("pacemaker") + systemd_service_status("pcsd") +
-			//systemd_service_status("corosync") + systemd_service_status("kpi_raw_generator") + systemd_service_status("kafka") +
-			//systemd_service_status("zookeeper") + systemd_service_status("httpbeat") + systemd_service_status("ccpe") +
-			//systemd_service_status("ucmdb") + systemd_service_status("zabbix") + systemd_service_status("kibana") +
-			//systemd_service_status("elastalert") +
-	    for(const std::string &str: systemdS)
-	    {
-		os_stats = os_stats + systemd_service_status(str);
-	    }
-	    for(int port: portInUse)
-	    {
-		os_stats = os_stats + is_address_in_use(ip, port);
-	    }
+            os_stats = os_stats + hostname_ip();// + zombie_count() + process_pid("sshd") + process_pid("syslogd") + vm_stats();
+
+            for(const std::string &str: os)
+	        {
+                if(str == "zombie")
+                {
+                    os_stats = os_stats + zombie_count();
+                }
+                else if(str == "vm")
+                {
+                    os_stats = os_stats + vm_stats();
+                }
+                else if(str == "fs")
+                {
+
+                }
+                else if(str == "swap")
+                {
+
+                }
+                else if(str == "net")
+                {
+
+                }
+                else if(str == "cpu")
+                {
+
+                }
+	        }
+	        for(const std::string &str: systemdS)
+	        {
+		        os_stats = os_stats + systemd_service_status(str);
+	        }
+	        for(int port: portInUse)
+	        {
+		        os_stats = os_stats + is_address_in_use(ip, port);
+	        }
+
+            if(csvDir != NULL) checkNextCsv(csvDir, logFile);
+            
             try
             {
                 NodeStats node;
