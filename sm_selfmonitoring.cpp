@@ -1534,14 +1534,14 @@ int isFileEmpty(const char *filename)
     return 0;
 }
 
-int checkNextCsv(const char *csvDir, const char *logFile)
+void checkCsv(const char *csvDir, const char *logFile)
 {
     bool found;
     std::string csvPath;
     static std::vector<std::string> csvList;
     DIR *dir;
     struct dirent *ent;
-    if((dir = opendir(csvDir)) == NULL) return -1;
+    if((dir = opendir(csvDir)) == NULL) return;
 
     while((ent = readdir(dir)) != NULL)
     {
@@ -1563,23 +1563,23 @@ int checkNextCsv(const char *csvDir, const char *logFile)
             switch (isFileEmpty(csvPath.c_str()))
             {
                 case -1:
-                    msg = "Cannot open file: " + std::string(ent->d_name);
+                    msg = "Could not open file for reading: " + csvPath;
                     writeToLog(logFile, msg.c_str());
                 break;
                 case 0:
                     if(isFileCsv(csvPath.c_str(), ",") == -1)
                     {
-                        msg = "File is not csv: " + std::string(ent->d_name);
+                        msg = "The following file has failed csv validation: " + csvPath;
                         writeToLog(logFile, msg.c_str());
                     }
                     else
                     {
-                        msg = "File is csv: " + std::string(ent->d_name);
+                        msg = "The following file has passed csv validation: " + csvPath;
                         writeToLog(logFile, msg.c_str());
                     }
                 break;
                 case 1:
-                    msg = "File is empty: " + std::string(ent->d_name);
+                    msg = "The following file is empty: " + csvPath;
                     writeToLog(logFile, msg.c_str());
                 break;
             }
@@ -1587,7 +1587,6 @@ int checkNextCsv(const char *csvDir, const char *logFile)
     }
 
     closedir(dir);
-    return 0;
 }
 
 void printHelp()
@@ -1595,14 +1594,15 @@ void printHelp()
 	std::cout << "Usage for skimmer version 1.0" << std::endl;
     std::cout << "\tGeneral Options:" << std::endl;
     std::cout << "\t\t-h print this help message" << std::endl;
-    std::cout << "\t\t-d daemonize" << std::endl;
+    std::cout << "\t\t-d [default=1min] daemonize, choose trigger step" << std::endl;
     std::cout << "\t\t-i [required] index name in elasticsearch" << std::endl;
     std::cout << "\t\t-t [default=_doc] index type in elasticsearch" << std::endl;
     std::cout << "\t\t-l [default=/tmp/skimmer.log] path to log file" << std::endl;
     std::cout << "\tMonitoring Options:" << std::endl;
-    std::cout << "\t\t-o [zombie,process(process_name),vm,fs,swap,net,cpu] comma separated OS statistics selected from the list" << std::endl;
-    std::cout << "\t\t-s comma separated systemd services to check their status" << std::endl;
-    std::cout << "\t\t-p comma separated ports to check if they are in use" << std::endl;
+    std::cout << "\t\t-o [zombie,vm,fs,swap,net,cpu] comma separated OS statistics selected from the list" << std::endl;
+    std::cout << "\t\t-p comma separated process names to print their pid" << std::endl;
+    std::cout << "\t\t-s comma separated systemd services to print their status" << std::endl;
+    std::cout << "\t\t-a comma separated port numbers to print if address is in use" << std::endl;
     std::cout << "\t\t-c path to directory containing files needed to be csv validated" << std::endl;
 }
 
@@ -1615,9 +1615,11 @@ int main(int argc, char *argv[])
     int opt;
     std::vector<std::string> systemdS;
     std::vector<std::string> os;
+    std::vector<std::string> process;
     std::vector<int> portInUse;
     bool daemonize = false;
-    while((opt = getopt(argc, argv, "hdi:t:l:o:s:p:c:")) != -1)
+    unsigned int sleepTime = 60;
+    while((opt = getopt(argc, argv, "hd:i:t:l:o:p:s:a:c:")) != -1)
     {
 	switch(opt)
 	{
@@ -1627,6 +1629,9 @@ int main(int argc, char *argv[])
 		break;
 		case 'd':
 			daemonize = true;
+            try{sleepTime = 60 * std::stoi(optarg);}
+            catch(const std::invalid_argument& err)
+            {std::cerr << "Invalid argument in -d option: " << err.what() <<std::endl;return -1;}
 		break;
 		case 'i':
 			indexName = optarg;
@@ -1646,6 +1651,15 @@ int main(int argc, char *argv[])
                     os.push_back(token);
             }
         break;
+        case 'p':
+            {
+                std::string arg(optarg);
+                std::istringstream iss(arg);
+                std::string token;
+                while(std::getline(iss, token, ','))
+                    process.push_back(token);
+            }
+        break;
 		case 's':
 			{
 				std::string arg(optarg);
@@ -1655,7 +1669,7 @@ int main(int argc, char *argv[])
 					systemdS.push_back(token);
 			}
 		break;
-		case 'p':
+		case 'a':
 			{
 				std::string arg(optarg);
 				std::istringstream iss(arg);
@@ -1668,7 +1682,7 @@ int main(int argc, char *argv[])
 					}
 					catch(const std::invalid_argument& err)
 					{
-						std::cerr << "Invalid argument in -p option: " << err.what() <<std::endl;
+						std::cerr << "Invalid argument in -a option: " << err.what() <<std::endl;
 						return -1;
 					}
 				}
@@ -1700,7 +1714,7 @@ int main(int argc, char *argv[])
             // Stats common for all nodes
             std::string ip = hostname_ip()["source_node_ip"];
             std::string os_stats;
-            os_stats = os_stats + hostname_ip();// + zombie_count() + process_pid("sshd") + process_pid("syslogd") + vm_stats();
+            os_stats = os_stats + hostname_ip();
 
             for(const std::string &str: os)
 	        {
@@ -1714,20 +1728,24 @@ int main(int argc, char *argv[])
                 }
                 else if(str == "fs")
                 {
-
+                    os_stats = os_stats + fs_stats();
                 }
                 else if(str == "swap")
                 {
-
+                    os_stats = os_stats + swap_stats();
                 }
                 else if(str == "net")
                 {
-
+                    os_stats = os_stats + net_stats();
                 }
                 else if(str == "cpu")
                 {
-
+                    os_stats = os_stats + cpu_stats();
                 }
+	        }
+            for(const std::string &str: process)
+	        {
+		        os_stats = os_stats + process_pid(str.c_str());
 	        }
 	        for(const std::string &str: systemdS)
 	        {
@@ -1738,8 +1756,8 @@ int main(int argc, char *argv[])
 		        os_stats = os_stats + is_address_in_use(ip, port);
 	        }
 
-            if(csvDir != NULL) checkNextCsv(csvDir, logFile);
-            
+            if(csvDir != NULL) checkCsv(csvDir, logFile);
+
             try
             {
                 NodeStats node;
@@ -1769,7 +1787,7 @@ int main(int argc, char *argv[])
                 std::cerr << error.what() << std::endl;
             }
 	    if(daemonize)
-          	  sleep(60);
+          	  sleep(sleepTime);
         } while(daemonize);
     }
 
