@@ -1594,7 +1594,7 @@ void printHelp()
 	std::cout << "Usage for skimmer version 1.0" << std::endl;
     std::cout << "\tGeneral Options:" << std::endl;
     std::cout << "\t\t-h print this help message" << std::endl;
-    std::cout << "\t\t-d [default=1min] daemonize, choose trigger step" << std::endl;
+    std::cout << "\t\t-d daemonize, choose trigger step in minutes" << std::endl;
     std::cout << "\t\t-i [required] index name in elasticsearch" << std::endl;
     std::cout << "\t\t-t [default=_doc] index type in elasticsearch" << std::endl;
     std::cout << "\t\t-l [default=/tmp/skimmer.log] path to log file" << std::endl;
