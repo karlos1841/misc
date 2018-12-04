@@ -8,10 +8,28 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <signal.h>
+#include <time.h>
 
-#define IP      "0.0.0.0"
-#define PORT    8080
-#define BUFFER  1024
+#define IP          "0.0.0.0"
+#define PORT        80
+#define BUFFER      1024
+#define LOG_PATH    "web.log"
+
+int log_to_file(const char *file_path, const char *message)
+{
+	FILE *f = fopen(file_path, "a");
+	if(f == NULL){fprintf(stderr, "cannot open file: %s\n", file_path); return -1;}
+	struct tm *timeinfo;
+    char time_buffer[20];
+	time_t rawtime = time(NULL);
+
+	timeinfo = localtime(&rawtime);
+	strftime(time_buffer, sizeof(time_buffer), "%d-%m-%Y %H:%M:%S", timeinfo);
+    fprintf(f, "%s: %s\n", time_buffer, message);
+
+	fclose(f);
+    return 0;
+}
 
 void calculation(const char *buf)
 {
@@ -68,15 +86,16 @@ void calculation(const char *buf)
 
                 payload += 1;
             }
-            printf("Statystyki dla mezczyzn!!!\n");
+
+            fprintf(stderr, "Statystyki dla mezczyzn!!!\n");
             for(int i = 0; i < 10; i++)
             {
                 for(int j = 0; j < 5; j++)
                 {
                     if(i == 0)
-                        printf("Pytanie %i, liczba odpowiedzi %i: %i\n", 10, j, mpoll1[j][i]);
+                        fprintf(stderr, "Pytanie %i, liczba odpowiedzi %i: %i\n", 10, j, mpoll1[j][i]);
                     else
-                        printf("Pytanie %i, liczba odpowiedzi %i: %i\n", i, j, mpoll1[j][i]);
+                        fprintf(stderr, "Pytanie %i, liczba odpowiedzi %i: %i\n", i, j, mpoll1[j][i]);
                 }
             }
             for(int i = 0; i < 10; i++)
@@ -84,9 +103,9 @@ void calculation(const char *buf)
                 for(int j = 0; j < 4; j++)
                 {
                     if(i == 0)
-                        printf("Pytanie %i, liczba odpowiedzi %i: %i\n", 20, j, mpoll2[j][i]);
+                        fprintf(stderr, "Pytanie %i, liczba odpowiedzi %i: %i\n", 20, j, mpoll2[j][i]);
                     else
-                        printf("Pytanie %i, liczba odpowiedzi %i: %i\n", i+10, j, mpoll2[j][i]);
+                        fprintf(stderr, "Pytanie %i, liczba odpowiedzi %i: %i\n", i+10, j, mpoll2[j][i]);
                 }
             }
         }
@@ -133,15 +152,16 @@ void calculation(const char *buf)
 
                 payload += 1;
             }
-            printf("Statystyki dla kobiet!!!\n");
+
+            fprintf(stderr, "Statystyki dla kobiet!!!\n");
             for(int i = 0; i < 10; i++)
             {
                 for(int j = 0; j < 5; j++)
                 {
                     if(i == 0)
-                        printf("Pytanie %i, liczba odpowiedzi %i: %i\n", 10, j, kpoll1[j][i]);
+                        fprintf(stderr, "Pytanie %i, liczba odpowiedzi %i: %i\n", 10, j, kpoll1[j][i]);
                     else
-                        printf("Pytanie %i, liczba odpowiedzi %i: %i\n", i, j, kpoll1[j][i]);
+                        fprintf(stderr, "Pytanie %i, liczba odpowiedzi %i: %i\n", i, j, kpoll1[j][i]);
                 }
             }
             for(int i = 0; i < 10; i++)
@@ -149,9 +169,9 @@ void calculation(const char *buf)
                 for(int j = 0; j < 4; j++)
                 {
                     if(i == 0)
-                        printf("Pytanie %i, liczba odpowiedzi %i: %i\n", 20, j, kpoll2[j][i]);
+                        fprintf(stderr, "Pytanie %i, liczba odpowiedzi %i: %i\n", 20, j, kpoll2[j][i]);
                     else
-                        printf("Pytanie %i, liczba odpowiedzi %i: %i\n", i+10, j, kpoll2[j][i]);
+                        fprintf(stderr, "Pytanie %i, liczba odpowiedzi %i: %i\n", i+10, j, kpoll2[j][i]);
                 }
             }
         }
@@ -211,7 +231,7 @@ int send_page(int fd, const char *buf)
         if((page = open_file("/root/index.html")) == NULL) return -1;
         char response[strlen(page) + 1024];
         snprintf(response, sizeof(response),
-        "HTTP/1.1 200 OK\r\nServer: karol\r\nCache-Control: no-cache, no-store, must-revalidate\r\nContent-Length: %zu\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n%s",
+        "HTTP/1.0 200 OK\r\nServer: karol\r\nCache-Control: no-cache, no-store, must-revalidate\r\nContent-Length: %zu\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n%s",
         strlen(page), page);
         write(fd, response, strlen(response));
         //printf("%s\n", response);
@@ -225,7 +245,7 @@ int send_page(int fd, const char *buf)
         if((page = open_file("/root/index2.html")) == NULL) return -1;
         char response[strlen(page) + 1024];
         snprintf(response, sizeof(response),
-        "HTTP/1.1 200 OK\r\nServer: karol\r\nCache-Control: no-cache, no-store, must-revalidate\r\nContent-Length: %zu\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n%s",
+        "HTTP/1.0 200 OK\r\nServer: karol\r\nCache-Control: no-cache, no-store, must-revalidate\r\nContent-Length: %zu\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n%s",
         strlen(page), page);
         write(fd, response, strlen(response));
         //printf("%s\n", response);
@@ -233,7 +253,7 @@ int send_page(int fd, const char *buf)
     }
     else
     {
-        const char *response = "HTTP/1.1 404 Not Found\r\nServer: karol\r\nConnection: close\r\n\r\n";
+        const char *response = "HTTP/1.0 404 Not Found\r\nServer: karol\r\nConnection: close\r\n\r\n";
         write(fd, response, strlen(response));
     }
 
@@ -268,19 +288,20 @@ int main()
 
     sigset_t sig_p;
     char request[BUFFER];
-    while((peer_sockfd = accept(sockfd, (struct sockaddr *)&peer_addr, &peer_addr_len)) != -1)
+    for(;;)
     {
+        sigpending(&sig_p);
+        if(sigismember(&sig_p, SIGINT) == 1 || sigismember(&sig_p, SIGTERM) == 1) break;
+        if((peer_sockfd = accept(sockfd, (struct sockaddr *)&peer_addr, &peer_addr_len)) == -1) break;
+
+
         if(read_request(peer_sockfd, request) != -1)
         {
-            printf("%s\n", request);
+            fprintf(stderr, "%s\n", request);
             send_page(peer_sockfd, request);
             calculation(request);
         }
         close(peer_sockfd);
-
-        sigpending(&sig_p);
-        if(sigismember(&sig_p, SIGINT) == 1 || sigismember(&sig_p, SIGTERM) == 1)
-            break;
     }
 
 
