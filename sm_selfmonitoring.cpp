@@ -24,6 +24,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <sys/vfs.h>
+#include <glob.h>
 
 #define IP_MAX 16
 
@@ -1464,55 +1465,38 @@ void appendDateNow(std::string &arg)
 	arg = arg + "-" + timestamp;
 }
 
-int isFileCsv(const char *filePath, const char *delim)
+int isStrCsv(const std::string &str, const char delim)
 {
         const int exit_failure = -1;
         const int exit_success = 0;
-        std::ifstream file;
-        std::string line, content;
-        file.open(filePath);
-        if(!file.good()) return exit_failure;
-        while(std::getline(file, line))
-        {
-            content += line;
-        }
-        file.close();
-        const char *str = content.c_str();
 
-
-        char *next_line = (char *)str;
-        size_t line_size = 0;
         // one column without delim
         unsigned column_num_ref = 1;
 
-        while(*next_line != '\0')
+        if(str.empty()) return exit_failure;
+
+        std::istringstream iss(str);
+        std::string line;
+        while(std::getline(iss, line))
         {
-                line_size = strcspn(next_line, "\n");
-                // line buffer contains the line without trailing '\n'
-                char *const line_buffer = (char *)calloc(line_size + 1, sizeof(char));
-                snprintf(line_buffer, line_size + 1, "%s", next_line);
-                // count number of columns
-                unsigned column_num = 1;
-                int i = 0;
-                while(line_buffer[i] != '\0')
-                {
-                        if(line_buffer[i] == *delim)
-                                column_num += 1;
+            // count number of columns
+            unsigned column_num = 1;
+            int i = 0;
+            for(char c: line)
+            {
+                if(c == delim)
+                    column_num += 1;
 
-                        i += 1;
-                }
-                if(column_num == 1)
-                        return exit_failure;
+                ++i;
+            }
+            if(column_num == 1)
+                return exit_failure;
 
-                // the first line is reference
-                if(column_num_ref == 1)
-                        column_num_ref = column_num;
-                if(column_num != column_num_ref)
-                        return exit_failure;
-                // pointer to the beginning of the next line
-                next_line = next_line + line_size + 1;
-
-                free(line_buffer);
+            // the first line is reference
+            if(column_num_ref == 1)
+                column_num_ref = column_num;
+            if(column_num != column_num_ref)
+                return exit_failure;
         }
 
         return exit_success;
@@ -1521,14 +1505,20 @@ int isFileCsv(const char *filePath, const char *delim)
 // -1 cannot open file
 // 1 file empty
 // 0 file exists and not empty
-int isFileEmpty(const char *filename)
+int isFileEmpty(const char *filename, std::string &fContent)
 {
-    FILE *f = NULL;
+    std::ifstream file;
+    file.open(filename);
+    if(!file.good()) return -1;
     unsigned long fsize = 0;
-    if((f = fopen(filename, "rb")) == NULL) return -1;
-    fseek(f, 0, SEEK_END);
-    fsize = ftell(f);
-    fclose(f);
+    file.seekg(0, file.end);
+    fsize = file.tellg();
+    file.seekg(0, file.beg);
+
+    std::stringstream ss;
+    ss << file.rdbuf();
+    fContent = ss.str();
+    file.close();
 
     if(fsize == 0) return 1;
     return 0;
@@ -1547,9 +1537,10 @@ void checkCsv(const char *csvDir, const char *logFile)
     {
         if(ent->d_type != DT_REG) continue;
         found = false;
+        csvPath = std::string(csvDir) + "/" + std::string(ent->d_name);
         for(const std::string &tmp: csvList)
         {
-            if(tmp == ent->d_name)
+            if(tmp == csvPath)
             {
                 found = true;
                 break;
@@ -1557,17 +1548,16 @@ void checkCsv(const char *csvDir, const char *logFile)
         }
         if(found == false)
         {
-            csvList.push_back(ent->d_name);
-            std::string msg;
-            csvPath = std::string(csvDir) + "/" + std::string(ent->d_name);
-            switch (isFileEmpty(csvPath.c_str()))
+            csvList.push_back(csvPath);
+            std::string msg, fileContent;
+            switch (isFileEmpty(csvPath.c_str(), fileContent))
             {
                 case -1:
                     msg = "Could not open file for reading: " + csvPath;
                     writeToLog(logFile, msg.c_str());
                 break;
                 case 0:
-                    if(isFileCsv(csvPath.c_str(), ",") == -1)
+                    if(isStrCsv(fileContent, ',') == -1)
                     {
                         msg = "The following file has failed csv validation: " + csvPath;
                         writeToLog(logFile, msg.c_str());
@@ -1587,6 +1577,18 @@ void checkCsv(const char *csvDir, const char *logFile)
     }
 
     closedir(dir);
+}
+
+void checkCsvByPattern(const char *csvDirPattern, const char *logFile)
+{
+    glob_t pglob;
+
+    if(glob(csvDirPattern, GLOB_NOSORT | GLOB_ONLYDIR, NULL, &pglob) != 0) return;
+
+    for(size_t i = 0; i < pglob.gl_pathc; i++)
+        checkCsv(pglob.gl_pathv[i], logFile);
+
+    globfree(&pglob);
 }
 
 void printHelp()
@@ -1756,7 +1758,7 @@ int main(int argc, char *argv[])
 		        os_stats = os_stats + is_address_in_use(ip, port);
 	        }
 
-            if(csvDir != NULL) checkCsv(csvDir, logFile);
+            if(csvDir != NULL) checkCsvByPattern(csvDir, logFile);
 
             try
             {
