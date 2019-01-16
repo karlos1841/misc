@@ -15,6 +15,7 @@
 #include <fstream>
 #include <typeinfo>
 #include <ctime>
+#include <algorithm>
 #include <unistd.h>
 #include <mntent.h>
 #include <dirent.h>
@@ -1524,21 +1525,21 @@ int isFileEmpty(const char *filename, std::string &fContent)
     return 0;
 }
 
-void checkCsv(const char *csvDir, const char *logFile)
+std::vector<std::string>* checkCsv(const char *csvDir, const char *logFile)
 {
     bool found;
     std::string csvPath;
-    static std::vector<std::string> csvList;
+    static std::vector<std::string> * const csvList = new std::vector<std::string>;
     DIR *dir;
     struct dirent *ent;
-    if((dir = opendir(csvDir)) == NULL) return;
+    if((dir = opendir(csvDir)) == NULL) return csvList;
 
     while((ent = readdir(dir)) != NULL)
     {
         if(ent->d_type != DT_REG) continue;
         found = false;
         csvPath = std::string(csvDir) + "/" + std::string(ent->d_name);
-        for(const std::string &tmp: csvList)
+        for(const std::string &tmp: *csvList)
         {
             if(tmp == csvPath)
             {
@@ -1548,7 +1549,7 @@ void checkCsv(const char *csvDir, const char *logFile)
         }
         if(found == false)
         {
-            csvList.push_back(csvPath);
+            (*csvList).push_back(csvPath);
             std::string msg, fileContent;
             switch (isFileEmpty(csvPath.c_str(), fileContent))
             {
@@ -1577,18 +1578,49 @@ void checkCsv(const char *csvDir, const char *logFile)
     }
 
     closedir(dir);
+    return csvList;
 }
 
 void checkCsvByPattern(const char *csvDirPattern, const char *logFile)
 {
     glob_t pglob;
+    std::vector<std::string> csvInAllDirs;
+    std::vector<std::string> *csvList;
 
     if(glob(csvDirPattern, GLOB_NOSORT | GLOB_ONLYDIR, NULL, &pglob) != 0) return;
 
+    // gather csv from all directories
     for(size_t i = 0; i < pglob.gl_pathc; i++)
-        checkCsv(pglob.gl_pathv[i], logFile);
+    {
+        DIR *dir;
+        struct dirent *ent;
+        std::string csvPath;
+        if((dir = opendir(pglob.gl_pathv[i])) == NULL) return;
+        while((ent = readdir(dir)) != NULL)
+        {
+            if(ent->d_type != DT_REG) continue;
+            csvPath = std::string(pglob.gl_pathv[i]) + "/" + std::string(ent->d_name);
+            csvInAllDirs.push_back(csvPath);
+        }
+        closedir(dir);
+    }
 
+    // check if dirs contain proper csvs
+    for(size_t i = 0; i < pglob.gl_pathc; i++)
+        csvList = checkCsv(pglob.gl_pathv[i], logFile);
+
+    // free memory
     globfree(&pglob);
+    for(size_t i = 0; i < (*csvList).size(); i++)
+    {
+        if(std::find(csvInAllDirs.begin(), csvInAllDirs.end(), (*csvList).at(i)) == csvInAllDirs.end())
+        {
+            (*csvList).erase((*csvList).begin() + i);
+            --i;
+        }
+    }
+
+    // TODO: delete vector on SIGTERM in main
 }
 
 void printHelp()
