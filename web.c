@@ -201,14 +201,10 @@ void close_file(const char *fcontent)
     free((char *)fcontent);
 }
 
-int read_request(int fd, char *buf)
+void read_request(int fd, char *buf)
 {
     memset(buf, 0, BUFFER);
-    // if no of bytes is less than requested, the request fits in the buffer
-    if(!(read(fd, buf, BUFFER - 1) < BUFFER - 1))
-        return -1;
-
-    return 0;
+    read(fd, buf, BUFFER - 1);
 }
 
 // buf points to client request
@@ -294,13 +290,10 @@ int main()
         if(sigismember(&sig_p, SIGINT) == 1 || sigismember(&sig_p, SIGTERM) == 1) break;
         if((peer_sockfd = accept(sockfd, (struct sockaddr *)&peer_addr, &peer_addr_len)) == -1) break;
 
-
-        if(read_request(peer_sockfd, request) != -1)
-        {
-            fprintf(stderr, "%s\n", request);
-            send_page(peer_sockfd, request);
-            calculation(request);
-        }
+        read_request(peer_sockfd, request);
+        fprintf(stderr, "%s\n", request);
+        send_page(peer_sockfd, request);
+        calculation(request);
         close(peer_sockfd);
     }
 
