@@ -1628,6 +1628,7 @@ void printHelp()
 	std::cout << "Usage for skimmer version 1.0" << std::endl;
     std::cout << "\tGeneral Options:" << std::endl;
     std::cout << "\t\t-h print this help message" << std::endl;
+    std::cout << "\t\t-f [IP:PORT] forward output to logstash" << std::endl;
     std::cout << "\t\t-d daemonize, choose trigger step in minutes" << std::endl;
     std::cout << "\t\t-i [required] index name in elasticsearch" << std::endl;
     std::cout << "\t\t-t [default=_doc] index type in elasticsearch" << std::endl;
@@ -1647,13 +1648,15 @@ int main(int argc, char *argv[])
     const char *csvDir = NULL;
     const char *logFile = "/tmp/skimmer.log";
     int opt;
+    std::string logstashIP;
+    unsigned short logstashPort = 0;
     std::vector<std::string> systemdS;
     std::vector<std::string> os;
     std::vector<std::string> process;
     std::vector<int> portInUse;
     bool daemonize = false;
     unsigned int sleepTime = 60;
-    while((opt = getopt(argc, argv, "hd:i:t:l:o:p:s:a:c:")) != -1)
+    while((opt = getopt(argc, argv, "hf:d:i:t:l:o:p:s:a:c:")) != -1)
     {
 	switch(opt)
 	{
@@ -1661,6 +1664,19 @@ int main(int argc, char *argv[])
 			printHelp();
 			return -1;
 		break;
+        case 'f':
+            {
+                std::string arg(optarg);
+                std::istringstream iss(arg);
+                std::string token;
+                std::getline(iss, token, ':');
+                logstashIP = token;
+                std::getline(iss, token);
+                try{logstashPort = std::stoi(token);}
+                catch(const std::invalid_argument& err)
+                {std::cerr << "Invalid argument in -f option: " << err.what() <<std::endl;return -1;}
+            }
+        break;
 		case 'd':
 			daemonize = true;
             try{sleepTime = 60 * std::stoi(optarg);}
@@ -1792,6 +1808,10 @@ int main(int argc, char *argv[])
 
             if(csvDir != NULL) checkCsvByPattern(csvDir, logFile);
 
+
+            // Send to logstash
+            if(!(logstashIP.empty() || logstashPort == 0))
+                sendData(os_stats.c_str(), logstashIP.c_str(), logstashPort);
             try
             {
                 NodeStats node;
@@ -1803,9 +1823,6 @@ int main(int argc, char *argv[])
             catch(const std::runtime_error &error)
             {
                 std::cerr << error.what() << std::endl;
-                // if elasticsearch is unavailable, then send os stats somewhere else(e.g. logstash)
-                os_stats.push_back('\n');
-                sendData(os_stats.c_str(), "127.0.0.1", 6110);
             }
 
             // Cluster stats
