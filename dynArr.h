@@ -14,12 +14,14 @@ typedef struct DynArr
 
 void dynArrCharInit(DynArr *d, const char *e);
 void dynArrCharAdd(DynArr *d, const char *e); // can be only used after dynArrCharInit
+void dynArrStrAdd(DynArr *d, const char *e);
 
 void dynArrIntInit(DynArr *d, int e);
 void dynArrIntAdd(DynArr *d, int e); // can be only used after dynArrIntInit
 
 void dynArrDestroy(DynArr *d);
 void *dynArrAt(const DynArr *d, size_t index);
+void *dynArrStrAt(const DynArr *d, size_t index);
 void dynArrClear(DynArr *d); // clear content, size of memblock is untouched
 
 #endif

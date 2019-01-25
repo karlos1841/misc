@@ -32,6 +32,22 @@ void dynArrCharAdd(DynArr *d, const char *e)
     d->ptr = ptr;
 }
 
+void dynArrStrAdd(DynArr *d, const char *e)
+{
+    if(d->ELEMENT_SIZE != sizeof(char))
+        // dynArrCharInit was not called
+        return;
+
+    size_t num_of_elem = strlen(e);
+    char *ptr = calloc(d->NUMBER_OF_ELEMENTS + num_of_elem + 2, d->ELEMENT_SIZE); // '\0' placed at start + end
+    memcpy(ptr, d->ptr, (d->NUMBER_OF_ELEMENTS) * (d->ELEMENT_SIZE));
+    memcpy(ptr + 1 + (d->NUMBER_OF_ELEMENTS) * (d->ELEMENT_SIZE), e, num_of_elem * (d->ELEMENT_SIZE));
+    free(d->ptr);
+
+    d->NUMBER_OF_ELEMENTS += num_of_elem + 1;
+    d->ptr = ptr;
+}
+
 void dynArrIntAdd(DynArr *d, int e)
 {
     if(d->ELEMENT_SIZE != sizeof(int))
@@ -51,6 +67,28 @@ void *dynArrAt(const DynArr *d, size_t index)
 {
     if(index < d->NUMBER_OF_ELEMENTS)
         return d->ptr + index * d->ELEMENT_SIZE;
+
+    return NULL;
+}
+
+void *dynArrStrAt(const DynArr *d, size_t index)
+{
+    if(d->ELEMENT_SIZE != sizeof(char))
+        return NULL;
+
+    if(index == 0)
+        return d->ptr;
+
+    size_t num_of_str = 1;
+    for(size_t i = 0; i < (d->NUMBER_OF_ELEMENTS) * (d->ELEMENT_SIZE); i++)
+    {
+        if(*(d->ptr + i) == 0)
+        {
+            if(index == num_of_str)
+                return (d->ptr + i + 1);
+            ++num_of_str;
+        }
+    }
 
     return NULL;
 }
