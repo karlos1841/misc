@@ -2,6 +2,9 @@
  * g++ -std=c++11 -pedantic -Wall -Wextra -Werror sm_selfmonitoring.cpp -o sm_selfmonitoring
  * Author: karol.wozniak@it.emca.pl
  *
+ * CHANGELOG
+ * 1.0 - initial release
+ * 1.0.1 - resetting descriptor on sendData function start and end to prevent it from leaking in some situations
 */
 #define _XOPEN_SOURCE 700 // POSIX 2008
 #include <iostream>
@@ -233,10 +236,17 @@ char *readResponse(const char *request, const char *host, unsigned short port)
 
 int sendData(const char *data, const char *host, unsigned short port)
 {
-	int socket_descriptor;
+	static int socket_descriptor = -1;
 	struct sockaddr_in server_info;
 	ssize_t status, total;
 	const int error_code = -1;
+
+    if(socket_descriptor != -1)
+    {
+        // reset descriptor
+        close(socket_descriptor);
+        socket_descriptor = -1;
+    }
 
 	if((socket_descriptor = socket(AF_INET, SOCK_STREAM, 0)) == -1)
     {
@@ -272,7 +282,9 @@ int sendData(const char *data, const char *host, unsigned short port)
 	//printf("%zd\n", status);
 	//printf("%s\n", response);
 
+    // reset descriptor
 	close(socket_descriptor);
+    socket_descriptor = -1;
 	return 0;
 }
 
@@ -1625,7 +1637,7 @@ void checkCsvByPattern(const char *csvDirPattern, const char *logFile)
 
 void printHelp()
 {
-	std::cout << "Usage for skimmer version 1.0" << std::endl;
+	std::cout << "Usage for skimmer version 1.0.1" << std::endl;
     std::cout << "\tGeneral Options:" << std::endl;
     std::cout << "\t\t-h print this help message" << std::endl;
     std::cout << "\t\t-f [IP:PORT] forward output to logstash" << std::endl;
