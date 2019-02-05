@@ -4,7 +4,7 @@
  *
  * CHANGELOG
  * 1.0 - initial release
- * 1.0.1 - resetting descriptor on sendData function start and end to prevent it from leaking in some situations
+ * 1.0.1 - resetting descriptor on sendData function's start and end to prevent it from leaking in some situations
 */
 #define _XOPEN_SOURCE 700 // POSIX 2008
 #include <iostream>
