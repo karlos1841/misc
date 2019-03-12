@@ -5,6 +5,7 @@
  * CHANGELOG
  * 1.0 - initial release
  * 1.0.1 - resetting descriptor on sendData function's start and end to prevent it from leaking in some situations
+ * 1.0.2 - rewritten readResponse and sendData + bugfix in process_pid
 */
 #define _XOPEN_SOURCE 700 // POSIX 2008
 #include <iostream>
@@ -167,68 +168,56 @@ char *readResponse(const char *request, const char *host, unsigned short port)
 	unsigned long bytes_read = 0;
 	unsigned long cur_size = 0;
 	struct sockaddr_in server_info;
-	char *error_code = NULL;
 
 	unsetenv("http_proxy");
 
 	//printf("%s\n", request);
 
-	if((socket_descriptor = socket(AF_INET, SOCK_STREAM, 0)) == -1)
+	if((socket_descriptor = socket(AF_INET, SOCK_STREAM, 0)) != -1)
 	{
-		//const char *msg = "[Error] could not create socket";
-		return error_code;
-	}
+    	memset(&server_info, 0, sizeof(server_info));
+	    server_info.sin_family = AF_INET;
+	    server_info.sin_port = htons(port);
+	    if((server_info.sin_addr.s_addr = hostnameToIP(host)) != 0)
+	    {
+	        //printf("%s\n", inet_ntoa(server_info.sin_addr));
+	        if(connect(socket_descriptor, (struct sockaddr *)&server_info, sizeof(server_info)) != -1)
+	        {
+	            total = strlen(request);
+	            do
+	            {
+		            status = write(socket_descriptor, request, total);
+		            if(status == -1)
+		            {
+                        break;
+		            }
+	            } while(status < total);
 
-	memset(&server_info, 0, sizeof(server_info));
-	server_info.sin_family = AF_INET;
-	server_info.sin_port = htons(port);
-	if((server_info.sin_addr.s_addr = hostnameToIP(host)) == 0)
-	{
-		//const char *msg = "[Error] incorrect address was given";
-		return error_code;
-	}
-	//printf("%s\n", inet_ntoa(server_info.sin_addr));
-	if(connect(socket_descriptor, (struct sockaddr *)&server_info, sizeof(server_info)) == -1)
-	{
-		//char msg[1024];
-		//snprintf(msg, sizeof(msg), "[Error] could not create connection to %s:%u", inet_ntoa(server_info.sin_addr), port);
-		return error_code;
-	}
+	            do
+	            {
+		            if(bytes_read+count >= cur_size)
+		            {
+			            char *tmp;
+			            cur_size+=count;
+			            tmp = (char *)realloc(response, cur_size);
+			            if(tmp == NULL)
+			            {
+                            break;
+			            }
 
-	total = strlen(request);
-	do
-	{
-		status = write(socket_descriptor, request, total);
-		if(status == -1)
-		{
-			//const char *msg = "[Error] could not send data to socket";
-			return error_code;
-		}
-	} while(status < total);
+			            response = tmp;
+			            // set expanded memory to 0
+			            memset(response + cur_size - count, 0, count);
+		            }
 
-	do
-	{
-		if(bytes_read+count >= cur_size)
-		{
-			char *tmp;
-			cur_size+=count;
-			tmp = (char *)realloc(response, cur_size);
-			if(tmp == NULL)
-			{
-				//const char *msg = "[Error] failed to reallocate memory";
-				return error_code;
-			}
-
-			response = tmp;
-			// set expanded memory to 0
-			memset(response + cur_size - count, 0, count);
-		}
-
-		if((status = read(socket_descriptor, response+bytes_read, count)) > 0)
-		{
-			bytes_read+=status;
-		}
-	} while(status > 0);
+		            if((status = read(socket_descriptor, response+bytes_read, count)) > 0)
+		            {
+			            bytes_read+=status;
+		            }
+	            } while(status > 0);
+            }
+        }
+    }
 
 	close(socket_descriptor);
 	return response;
@@ -236,56 +225,53 @@ char *readResponse(const char *request, const char *host, unsigned short port)
 
 int sendData(const char *data, const char *host, unsigned short port)
 {
-	static int socket_descriptor = -1;
+	int socket_descriptor;
 	struct sockaddr_in server_info;
 	ssize_t status, total;
-	const int error_code = -1;
+	int status_code = 0;
 
-    if(socket_descriptor != -1)
+	if((socket_descriptor = socket(AF_INET, SOCK_STREAM, 0)) != -1)
     {
-        // reset descriptor
-        close(socket_descriptor);
-        socket_descriptor = -1;
+        memset(&server_info, 0, sizeof(server_info));
+        server_info.sin_family = AF_INET;
+        server_info.sin_port = htons(port);
+        if((server_info.sin_addr.s_addr = hostnameToIP(host)) != 0)
+        {
+            if(connect(socket_descriptor, (struct sockaddr *)&server_info, sizeof(server_info)) != -1)
+            {
+                total = strlen(data);
+                do
+                {
+                    status = write(socket_descriptor, data, total);
+                    if(status == -1)
+                    {
+                        //const char *msg = "[Error] could not send data to socket";
+                        status_code = -1;
+                        break;
+                    }
+                } while(status < total);
+            }
+            else
+            {
+                //char msg[1024];
+		        //snprintf(msg, sizeof(msg), "[Error] could not create connection to %s:%u", inet_ntoa(server_info.sin_addr), port);
+                status_code = -1;
+            }
+        }
+        else
+        {
+            //const char *msg = "[Error] incorrect address was given";
+            status_code = -1;
+        }
     }
-
-	if((socket_descriptor = socket(AF_INET, SOCK_STREAM, 0)) == -1)
+    else
     {
         //const char *msg = "[Error] could not create socket";
-        return error_code;
+        status_code = -1;
     }
 
-    memset(&server_info, 0, sizeof(server_info));
-    server_info.sin_family = AF_INET;
-    server_info.sin_port = htons(port);
-    if((server_info.sin_addr.s_addr = hostnameToIP(host)) == 0)
-    {
-        //const char *msg = "[Error] incorrect address was given";
-        return error_code;
-    }
-    if(connect(socket_descriptor, (struct sockaddr *)&server_info, sizeof(server_info)) == -1)
-    {
-        //char msg[1024];
-		//snprintf(msg, sizeof(msg), "[Error] could not create connection to %s:%u", inet_ntoa(server_info.sin_addr), port);
-        return error_code;
-    }
-
-	total = strlen(data);
-    do
-    {
-        status = write(socket_descriptor, data, total);
-        if(status == -1)
-        {
-            //const char *msg = "[Error] could not send data to socket";
-            return error_code;
-        }
-    } while(status < total);
-	//printf("%zd\n", status);
-	//printf("%s\n", response);
-
-    // reset descriptor
 	close(socket_descriptor);
-    socket_descriptor = -1;
-	return 0;
+	return status_code;
 }
 
 int sendDataToElasticsearch(const std::string &data, const std::string &index, const std::string &type, const char *host, unsigned short port)
@@ -1238,8 +1224,8 @@ std::unordered_map<std::string, std::string> process_pid(const char *name)
         std::getline(cmdline, line);
         cmdline.close();
 
-        /*** if /proc/pid/cmdline contains process name then save pid ***/
-        if((found = line.find(name)) != std::string::npos)
+        /*** if /proc/pid/cmdline starts with process name then save pid ***/
+        if((found = line.find(name)) != std::string::npos && found == 0)
         {
             process.insert({pid_str, ent->d_name});
             break;
@@ -1637,7 +1623,7 @@ void checkCsvByPattern(const char *csvDirPattern, const char *logFile)
 
 void printHelp()
 {
-	std::cout << "Usage for skimmer version 1.0.1" << std::endl;
+	std::cout << "Usage for skimmer version 1.0.2" << std::endl;
     std::cout << "\tGeneral Options:" << std::endl;
     std::cout << "\t\t-h print this help message" << std::endl;
     std::cout << "\t\t-f [IP:PORT] forward output to logstash" << std::endl;
