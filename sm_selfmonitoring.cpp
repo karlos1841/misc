@@ -1633,7 +1633,7 @@ void printSampleConfig()
     std::cout << "\t\t# user and password to elasticsearch api" << std::endl;
     std::cout << "\t\telasticsearch_auth = logserver:logserver" << std::endl << std::endl;
 
-    std::cout << "\t\t# forward output to logstash, if not empty then elasticseach specific options above are not used" << std::endl;
+    std::cout << "\t\t# forward output to logstash instead" << std::endl;
     std::cout << "\t\t# logstash_address = 127.0.0.1:6110" << std::endl << std::endl;
 
     std::cout << "\t\t# path to log file" << std::endl;
