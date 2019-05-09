@@ -1,5 +1,5 @@
 /*
- * g++ -std=c++11 -pedantic -Wall -Wextra -Werror sm_selfmonitoring.cpp -o sm_selfmonitoring -lssl -lcrypto
+ * g++ -std=c++11 -pedantic -Wall -Wextra sm_selfmonitoring.cpp -o sm_selfmonitoring -lssl -lcrypto
  * Author: karol.wozniak@it.emca.pl
  *
  * CHANGELOG
