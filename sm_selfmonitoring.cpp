@@ -1624,8 +1624,9 @@ void printHelp()
 
 void printSampleConfig()
 {
-    std::cout << "\t\t# index name in elasticsearch to store metrics" << std::endl;
-    std::cout << "\t\tindex_name = skimmer" << std::endl << std::endl;
+    std::cout << "\t\t# index name in elasticsearch" << std::endl;
+    std::cout << "\t\tindex_name = skimmer" << std::endl;
+    std::cout << "\t\tindex_daily = true" << std::endl << std::endl;
 
     std::cout << "\t\t# type in elasticsearch index" << std::endl;
     std::cout << "\t\tindex_type = _doc" << std::endl << std::endl;
@@ -1633,8 +1634,13 @@ void printSampleConfig()
     std::cout << "\t\t# user and password to elasticsearch api" << std::endl;
     std::cout << "\t\telasticsearch_auth = logserver:logserver" << std::endl << std::endl;
 
-    std::cout << "\t\t# forward output to logstash instead" << std::endl;
+    std::cout << "\t\t# available outputs" << std::endl;
+    std::cout << "\t\telasticsearch_address = 127.0.0.1:9200" << std::endl;
     std::cout << "\t\t# logstash_address = 127.0.0.1:6110" << std::endl << std::endl;
+
+    std::cout << "\t\t# retrieve from api" << std::endl;
+    std::cout << "\t\telasticsearch_api = 127.0.0.1:9200" << std::endl;
+    std::cout << "\t\t# logstash_api = 127.0.0.1:9600" << std::endl << std::endl;
 
     std::cout << "\t\t# path to log file" << std::endl;
     std::cout << "\t\tlog_file = /tmp/skimmer.log" << std::endl << std::endl;
@@ -1642,7 +1648,7 @@ void printSampleConfig()
     std::cout << "\t\t# daemonize" << std::endl;
     std::cout << "\t\tdaemonize = true" << std::endl << std::endl;
 
-    std::cout << "\t\t# [zombie,vm,fs,swap,net,cpu] comma separated OS statistics selected from the list" << std::endl;
+    std::cout << "\t\t# comma separated OS statistics selected from the list [zombie,vm,fs,swap,net,cpu]" << std::endl;
     std::cout << "\t\tos_stats = zombie,vm,fs,swap,net,cpu" << std::endl << std::endl;
 
     std::cout << "\t\t# comma separated process names to print their pid" << std::endl;
@@ -1664,14 +1670,17 @@ struct Args
     std::string indexType;
     std::string base64auth;
     std::string logFile;
+    std::string elasticsearchIP;
+    size_t elasticsearchPort;
     std::string logstashIP;
     size_t logstashPort;
     bool daemonize;
-    std::string csvDir;
+
     std::vector<std::string> systemdS;
     std::vector<std::string> os;
     std::vector<std::string> process;
     std::vector<int> portInUse;
+    std::string csvDir;
 
     // default values
     Args():
@@ -1691,11 +1700,14 @@ int Args::readConfig(const char *filename)
 {
     std::string content;
     std::string line;
-    std::string first, second;
+    std::string value;
+    std::size_t found;
     std::string opt[] = {
         "index_name",
+        "index_daily",
         "index_type",
         "elasticsearch_auth",
+        "elasticsearch_address",
         "logstash_address",
         "log_file",
         "daemonize",
@@ -1711,38 +1723,55 @@ int Args::readConfig(const char *filename)
     std::istringstream iss(content);
     while(std::getline(iss, line))
     {
-        int index = -1;
-        line.erase(std::remove(line.begin(), line.end(), ' '), line.end());
-        if(line[0] == '#')
-            continue;
-
-        std::istringstream iline(line);
-        if(!std::getline(iline, first, '='))
-            continue;
-        std::getline(iline, second);
-
+        int index = 0;
         for(const std::string &i: opt)
         {
-            index += 1;
-            if(i != first)
+            if(!((found = line.find(i)) != std::string::npos && found == 0))
                 continue;
+
+            std::istringstream iline(line);
+            if(!std::getline(iline, value, '='))
+                continue;
+            std::getline(iline, value);
+            value.erase(std::remove(value.begin(), value.end(), ' '), value.end());
 
             switch(index)
             {
                 case 0:
-                    indexName = second;
-                    appendDateNow(indexName);
+                    indexName = value;
                 break;
                 case 1:
-                    indexType = second;
+                    if(value == "true")
+                        appendDateNow(indexName);
                 break;
                 case 2:
-                    base64Encode(second.c_str());
+                    indexType = value;
                 break;
-                // if address has wrong format then logstashIP is emptied out
                 case 3:
+                    base64Encode(value.c_str());
+                break;
+                case 4:
                     {
-                        std::istringstream iarg(second);
+                        std::istringstream iarg(value);
+                        std::string token;
+                        if(!std::getline(iarg, token, ':'))
+                            continue;
+                        elasticsearchIP = token;
+
+                        std::getline(iarg, token);
+                        try
+                        {
+                            elasticsearchPort = std::stoi(token);
+                        }
+                        catch(const std::invalid_argument& err)
+                        {
+                            elasticsearchIP.clear();
+                        }
+                    }
+                break;
+                case 5:
+                    {
+                        std::istringstream iarg(value);
                         std::string token;
                         if(!std::getline(iarg, token, ':'))
                             continue;
@@ -1752,10 +1781,6 @@ int Args::readConfig(const char *filename)
                         try
                         {
                             logstashPort = std::stoi(token);
-                            if(!(logstashPort >= MIN_PORT && logstashPort <= MAX_PORT))
-                            {
-                                logstashIP.clear();
-                            }
                         }
                         catch(const std::invalid_argument& err)
                         {
@@ -1763,40 +1788,40 @@ int Args::readConfig(const char *filename)
                         }
                     }
                 break;
-                case 4:
-                    logFile = second;
+                case 6:
+                    logFile = value;
                 break;
-                case 5:
-                    if(second == "true")
+                case 7:
+                    if(value == "true")
                         daemonize = true;
                 break;
-                case 6:
+                case 8:
                     {
-                        std::istringstream iarg(second);
+                        std::istringstream iarg(value);
                         std::string token;
                         while(std::getline(iarg, token, ','))
                             os.push_back(token);
                     }
                 break;
-                case 7:
+                case 9:
                     {
-                        std::istringstream iarg(second);
+                        std::istringstream iarg(value);
                         std::string token;
                         while(std::getline(iarg, token, ','))
                             process.push_back(token);
                     }
                 break;
-                case 8:
+                case 10:
                     {
-                        std::istringstream iarg(second);
+                        std::istringstream iarg(value);
 			            std::string token;
 				        while(std::getline(iarg, token, ','))
 					        systemdS.push_back(token);
                     }
                 break;
-                case 9:
+                case 11:
                     {
-                        std::istringstream iarg(second);
+                        std::istringstream iarg(value);
 				        std::string token;
 				        while(std::getline(iarg, token, ','))
 				        {
@@ -1811,20 +1836,34 @@ int Args::readConfig(const char *filename)
 			            }
                     }
                 break;
-                case 10:
-                    csvDir = second;
+                case 12:
+                    csvDir = value;
                 break;
             }
+
+            index += 1;
         }
     }
 
     std::string msg = "Configuration Options: \nIndex Name: " + indexName +
                         "\nIndex Type: " + indexType +
                         "\nElasticsearch Auth: " + base64auth +
-                        "\nLogstash IP: " + logstashIP +
-                        "\nLogstash Port: " + std::to_string(logstashPort) +
                         "\nDaemonize: " + std::to_string(daemonize) +
                         "\n";
+
+    if(!elasticsearchIP.empty())
+    {
+        msg += "Elasticsearch IP: " + elasticsearchIP +
+                "\nElasticsearch Port: " + std::to_string(elasticsearchPort) +
+                "\n";
+    }
+    if(!logstashIP.empty())
+    {
+        msg += "Logstash IP: " + logstashIP +
+                "\nLogstash Port: " + std::to_string(logstashPort) +
+                "\n";
+    }
+
     writeToLog(logFile.c_str(), msg.c_str());
     return 0;
 }
