@@ -1727,9 +1727,11 @@ int Args::readConfig(const char *filename)
     std::istringstream iss(content);
     while(std::getline(iss, line))
     {
-        int index = 0;
+        int index = -1;
         for(const std::string &i: opt)
         {
+            index += 1;
+
             if(!((found = line.find(i)) != std::string::npos && found == 0))
                 continue;
 
@@ -1882,8 +1884,6 @@ int Args::readConfig(const char *filename)
                     csvDir = value;
                 break;
             }
-
-            index += 1;
         }
     }
 
