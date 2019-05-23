@@ -289,6 +289,49 @@ int sendDataToElasticsearch(const std::string &data, const std::string &index, c
     return sendData(elastic_request.c_str(), host, port);
 }
 
+const char *extract_json_value(const char *response, const char **json_key, int levels)
+{
+    const char *value;
+    int index = 1;
+    if((value = strstr(response, json_key[0])) == NULL) return NULL;
+    for(; index < levels; index++)
+    {
+        if((value = strstr(value, json_key[index])) == NULL) return NULL;
+    }
+    value += strlen(json_key[index - 1]);
+    return value;
+}
+
+int remove_json_entry(const char *response, const char **json_key, int levels)
+{
+    char *value;
+    int index = 1;
+    // not changing the size of memory, only replacing chars
+    if((value = (char *)strstr(response, json_key[0])) == NULL) return -1;
+    for(; index < levels; index++)
+    {
+        if((value = strstr(value, json_key[index])) == NULL) return -1;
+    }
+
+    index = 0;
+    while(*(value + index) != '}' && *(value + index) != ',')
+    {
+        *(value + index) = ' ';
+        index += 1;
+    }
+
+    if(*(value - 1) == ',' && *(value + index) == ',')
+        *(value + index) = ' ';
+
+    else if(*(value - 1) == '{' && *(value + index) == ',')
+        *(value + index) = ' ';
+
+    else if(*(value - 1) == ',' && *(value + index) == '}')
+        *(value - 1) = ' ';
+
+    return 0;
+}
+
 template<typename T>
 std::ostream &operator<<(std::ostream &stream, const std::unordered_map<std::string, T> &map)
 {
@@ -391,7 +434,6 @@ class Node
     const char *elasticsearchIP;
     unsigned short elasticsearchPort;
     std::unordered_map<std::string, std::string> api_timestamp(const char *);
-    const char *extract_json_value(const char *, const char **, int);
 
     public:
     Node(const std::string &_base64auth, const std::string &_elasticsearchIP, unsigned short _elasticsearchPort): base64auth(_base64auth), elasticsearchIP(_elasticsearchIP.c_str()), elasticsearchPort(_elasticsearchPort)
@@ -402,19 +444,6 @@ class Node
             throw std::runtime_error("Failed to construct Node object: Unable to determine master node");
     };
 };
-
-const char *Node::extract_json_value(const char *response, const char **json_key, int levels)
-{
-    const char *value;
-    int index = 1;
-    if((value = strstr(response, json_key[0])) == NULL) return NULL;
-    for(; index < levels; index++)
-    {
-        if((value = strstr(value, json_key[index])) == NULL) return NULL;
-    }
-    value += strlen(json_key[index - 1]);
-    return value;
-}
 
 std::unordered_map<std::string, std::string> Node::api_timestamp(const char *response)
 {
@@ -1109,6 +1138,69 @@ std::unordered_map<std::string, uint64_t> NodeStats::api_stats()
 /***************************************/
 /***************************************/
 
+/**************************************/
+/**************************************/
+/********* LOGSTASH API CLASS *********/
+
+class LogstashStats
+{
+    // API
+    const char *api_response;
+    const char *logstashIP;
+    unsigned short logstashPort;
+
+    int api_stats();
+
+    public:
+        LogstashStats(const std::string &_logstashIP, unsigned short _logstashPort): logstashIP(_logstashIP.c_str()), logstashPort(_logstashPort)
+        {
+            const std::string logstash_request = "GET /_node/stats/?human=false HTTP/1.0\r\nContent-type: application/json\r\n\r\n";
+            api_response = readResponse(logstash_request.c_str(), logstashIP, logstashPort);
+            if(api_response == NULL)
+                throw std::runtime_error("Failed to construct LogstashStats object: NULL response");
+        };
+        ~LogstashStats(){free((char *)api_response);};
+
+        std::string get_api_stats()
+        {
+            if(api_stats() == -1)
+                throw std::runtime_error("Error in LogstashStats object: Failed to retrieve api stats");
+            std::string json_output;
+            json_output = json_output + hostname_ip() + std::string(api_response);
+
+            return json_output;
+        };
+};
+
+int LogstashStats::api_stats()
+{
+    if(getHttpStatus(api_response) != 200) return -1;
+    api_response = remove_headers((char **)&api_response);
+
+    union Key{const char *keys[5];};
+    Key keys;
+
+    keys = {"\"host\""};
+    remove_json_entry(api_response, keys.keys, 1);
+
+    keys = {"\"version\""};
+    remove_json_entry(api_response, keys.keys, 1);
+
+    keys = {"\"http_address\""};
+    remove_json_entry(api_response, keys.keys, 1);
+
+    keys = {"\"id\""};
+    remove_json_entry(api_response, keys.keys, 1);
+
+    keys = {"\"name\""};
+    remove_json_entry(api_response, keys.keys, 1);
+
+    return 0;
+}
+
+/****** END OF LOGSTASH API CLASS ******/
+/***************************************/
+/***************************************/
 
 /***************************************/
 /***************************************/
@@ -2067,7 +2159,19 @@ int main(int argc, char *argv[])
             // send logstash api data
             if(!arg.logstashIPApi.empty())
             {
+                try
+                {
+                    LogstashStats object(arg.logstashIPApi, arg.logstashPortApi);
+                    if(!arg.elasticsearchIP.empty())
+                        sendDataToElasticsearch(object.get_api_stats(), arg.indexName, arg.indexType, arg.base64auth, arg.elasticsearchIP.c_str(), arg.elasticsearchPort);
 
+                    if(!arg.logstashIP.empty())
+                        sendData(object.get_api_stats().c_str(), arg.logstashIP.c_str(), arg.logstashPort);
+                }
+                catch(const std::runtime_error &error)
+                {
+                    std::cerr << error.what() << std::endl;
+                }
             }
 
             exit(0); // exit child
