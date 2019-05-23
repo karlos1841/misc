@@ -387,17 +387,15 @@ class Node
     std::string masterNodeIP;
     std::string nodeIP;
     std::string nodeHostname;
+    std::string base64auth;
     const char *elasticsearchIP;
     unsigned short elasticsearchPort;
-    std::string base64auth;
     std::unordered_map<std::string, std::string> api_timestamp(const char *);
     const char *extract_json_value(const char *, const char **, int);
 
     public:
-    Node(const std::string &base64auth): base64auth(base64auth)
+    Node(const std::string &_base64auth, const std::string &_elasticsearchIP, unsigned short _elasticsearchPort): base64auth(_base64auth), elasticsearchIP(_elasticsearchIP.c_str()), elasticsearchPort(_elasticsearchPort)
     {
-        elasticsearchIP = "127.0.0.1";
-        elasticsearchPort = 9200;
         if(node_hostname_ip(nodeHostname, nodeIP) == -1)
             throw std::runtime_error("Failed to construct Node object: Hostname/IP unknown");
         if(master_node_ip() == -1)
@@ -471,7 +469,7 @@ class ClusterStats : private Node
     std::unordered_map<std::string, float> api_health();
 
     public:
-    ClusterStats(const std::string &base64auth): Node(base64auth)
+    ClusterStats(const std::string &_base64auth, const std::string &_elasticsearchIP, unsigned short _elasticsearchPort): Node(_base64auth, _elasticsearchIP, _elasticsearchPort)
     {
         if(nodeIP != masterNodeIP)
             throw std::runtime_error("Failed to construct ClusterStats object: It is not a master node");
@@ -780,7 +778,7 @@ class NodeStats : private Node
     std::unordered_map<std::string, uint64_t> api_stats();
 
     public:
-        NodeStats(const std::string &base64auth): Node(base64auth)
+        NodeStats(const std::string &_base64auth, const std::string &_elasticsearchIP, unsigned short _elasticsearchPort): Node(_base64auth, _elasticsearchIP, _elasticsearchPort)
         {
             const std::string elastic_request = "GET /_nodes/" + nodeIP + "/stats HTTP/1.0\r\nContent-type: application/json\r\nAuthorization: Basic " + base64auth + "\r\n\r\n";
             api_response = readResponse(elastic_request.c_str(), elasticsearchIP, elasticsearchPort);
@@ -1674,6 +1672,10 @@ struct Args
     size_t elasticsearchPort;
     std::string logstashIP;
     size_t logstashPort;
+    std::string elasticsearchIPApi;
+    size_t elasticsearchPortApi;
+    std::string logstashIPApi;
+    size_t logstashPortApi;
     bool daemonize;
 
     std::vector<std::string> systemdS;
@@ -1702,13 +1704,15 @@ int Args::readConfig(const char *filename)
     std::string line;
     std::string value;
     std::size_t found;
-    std::string opt[] = {
+    const std::string opt[] = {
         "index_name",
         "index_daily",
         "index_type",
         "elasticsearch_auth",
         "elasticsearch_address",
         "logstash_address",
+        "elasticsearch_api",
+        "logstash_api",
         "log_file",
         "daemonize",
         "os_stats",
@@ -1789,13 +1793,51 @@ int Args::readConfig(const char *filename)
                     }
                 break;
                 case 6:
-                    logFile = value;
+                    {
+                        std::istringstream iarg(value);
+                        std::string token;
+                        if(!std::getline(iarg, token, ':'))
+                            continue;
+                        elasticsearchIPApi = token;
+
+                        std::getline(iarg, token);
+                        try
+                        {
+                            elasticsearchPortApi = std::stoi(token);
+                        }
+                        catch(const std::invalid_argument& err)
+                        {
+                            elasticsearchIPApi.clear();
+                        }
+                    }
                 break;
                 case 7:
+                    {
+                        std::istringstream iarg(value);
+                        std::string token;
+                        if(!std::getline(iarg, token, ':'))
+                            continue;
+                        logstashIPApi = token;
+
+                        std::getline(iarg, token);
+                        try
+                        {
+                            logstashPortApi = std::stoi(token);
+                        }
+                        catch(const std::invalid_argument& err)
+                        {
+                            logstashIPApi.clear();
+                        }
+                    }
+                break;
+                case 8:
+                    logFile = value;
+                break;
+                case 9:
                     if(value == "true")
                         daemonize = true;
                 break;
-                case 8:
+                case 10:
                     {
                         std::istringstream iarg(value);
                         std::string token;
@@ -1803,7 +1845,7 @@ int Args::readConfig(const char *filename)
                             os.push_back(token);
                     }
                 break;
-                case 9:
+                case 11:
                     {
                         std::istringstream iarg(value);
                         std::string token;
@@ -1811,7 +1853,7 @@ int Args::readConfig(const char *filename)
                             process.push_back(token);
                     }
                 break;
-                case 10:
+                case 12:
                     {
                         std::istringstream iarg(value);
 			            std::string token;
@@ -1819,7 +1861,7 @@ int Args::readConfig(const char *filename)
 					        systemdS.push_back(token);
                     }
                 break;
-                case 11:
+                case 13:
                     {
                         std::istringstream iarg(value);
 				        std::string token;
@@ -1836,7 +1878,7 @@ int Args::readConfig(const char *filename)
 			            }
                     }
                 break;
-                case 12:
+                case 14:
                     csvDir = value;
                 break;
             }
@@ -1853,14 +1895,27 @@ int Args::readConfig(const char *filename)
 
     if(!elasticsearchIP.empty())
     {
-        msg += "Elasticsearch IP: " + elasticsearchIP +
-                "\nElasticsearch Port: " + std::to_string(elasticsearchPort) +
+        msg += "Output Elasticsearch IP: " + elasticsearchIP +
+                "\nOutput Elasticsearch Port: " + std::to_string(elasticsearchPort) +
                 "\n";
     }
     if(!logstashIP.empty())
     {
-        msg += "Logstash IP: " + logstashIP +
-                "\nLogstash Port: " + std::to_string(logstashPort) +
+        msg += "Output Logstash IP: " + logstashIP +
+                "\nOutput Logstash Port: " + std::to_string(logstashPort) +
+                "\n";
+    }
+
+    if(!elasticsearchIPApi.empty())
+    {
+        msg += "API Elasticsearch IP: " + elasticsearchIPApi +
+                "\nAPI Elasticsearch Port: " + std::to_string(elasticsearchPortApi) +
+                "\n";
+    }
+    if(!logstashIPApi.empty())
+    {
+        msg += "API Logstash IP: " + logstashIPApi +
+                "\nAPI Logstash Port: " + std::to_string(logstashPortApi) +
                 "\n";
     }
 
@@ -1975,48 +2030,44 @@ int main(int argc, char *argv[])
 
             if(!arg.csvDir.empty()) checkCsvByPattern(arg.csvDir.c_str(), arg.logFile.c_str());
 
-            // send os stats to logstash
+            // os stats
+            if(!arg.elasticsearchIP.empty())
+                sendDataToElasticsearch(os_stats, arg.indexName, arg.indexType, arg.base64auth, arg.elasticsearchIP.c_str(), arg.elasticsearchPort);
+
             if(!arg.logstashIP.empty())
-                    sendData(os_stats.c_str(), arg.logstashIP.c_str(), arg.logstashPort);
+                sendData(os_stats.c_str(), arg.logstashIP.c_str(), arg.logstashPort);
 
-            // send elasticsearch stats
-            // Node stats
-            try
+            // send elasticsearch api data
+            if(!arg.elasticsearchIPApi.empty())
             {
-                NodeStats node(arg.base64auth);
+                try
+                {
+                    // node stats
+                    NodeStats node(arg.base64auth, arg.elasticsearchIPApi, arg.elasticsearchPortApi);
+                    if(!arg.elasticsearchIP.empty())
+                        sendDataToElasticsearch(node.get_api_stats(), arg.indexName, arg.indexType, arg.base64auth, arg.elasticsearchIP.c_str(), arg.elasticsearchPort);
 
-                if(!arg.logstashIP.empty())
-                {
-                    sendData(node.get_api_stats().c_str(), arg.logstashIP.c_str(), arg.logstashPort);
-                }
-                else
-                {
-                    sendDataToElasticsearch(os_stats, arg.indexName, arg.indexType, arg.base64auth, "127.0.0.1", 9200);
-                    sendDataToElasticsearch(node.get_api_stats(), arg.indexName, arg.indexType, arg.base64auth, "127.0.0.1", 9200);
-                }
-            }
-            catch(const std::runtime_error &error)
-            {
-                std::cerr << error.what() << std::endl;
-            }
+                    if(!arg.logstashIP.empty())
+                        sendData(node.get_api_stats().c_str(), arg.logstashIP.c_str(), arg.logstashPort);
 
-            // Cluster stats
-            try
-            {
-                ClusterStats cluster(arg.base64auth);
+                    // cluster stats
+                    ClusterStats cluster(arg.base64auth, arg.elasticsearchIPApi, arg.elasticsearchPortApi);
+                    if(!arg.elasticsearchIP.empty())
+                        sendDataToElasticsearch(cluster.get_api_stats(), arg.indexName, arg.indexType, arg.base64auth, arg.elasticsearchIP.c_str(), arg.elasticsearchPort);
 
-                if(!arg.logstashIP.empty())
-                {
-                    sendData(cluster.get_api_stats().c_str(), arg.logstashIP.c_str(), arg.logstashPort);
+                    if(!arg.logstashIP.empty())
+                        sendData(cluster.get_api_stats().c_str(), arg.logstashIP.c_str(), arg.logstashPort);
                 }
-                else
+                catch(const std::runtime_error &error)
                 {
-                    sendDataToElasticsearch(cluster.get_api_stats(), arg.indexName, arg.indexType, arg.base64auth, "127.0.0.1", 9200);
+                    std::cerr << error.what() << std::endl;
                 }
             }
-            catch(const std::runtime_error &error)
+
+            // send logstash api data
+            if(!arg.logstashIPApi.empty())
             {
-                std::cerr << error.what() << std::endl;
+
             }
 
             exit(0); // exit child
