@@ -8,6 +8,7 @@
  * 1.0.2 - rewritten readResponse and sendData + bugfix in process_pid
  * 1.0.3 - code cleanup
  * 1.0.4 - configuration options moved to file
+ * 1.0.5 - added logstash api + bugfix in readResponse
 */
 #define _XOPEN_SOURCE 700 // POSIX 2008
 #include <iostream>
@@ -174,6 +175,8 @@ char *readResponse(const char *request, const char *host, unsigned short port)
     ssize_t write_s;
     unsigned long counter = 0;
     char *tmp;
+    int bytes = 0;
+    int bytes_all = 0;
 
 	unsetenv("http_proxy");
 
@@ -192,6 +195,7 @@ char *readResponse(const char *request, const char *host, unsigned short port)
                     do
                     {
                         counter += 1;
+                        bytes_all += bytes;
                         tmp = (char *)realloc(response, BUFFER * counter);
                         if(tmp == NULL)
                         {
@@ -205,7 +209,7 @@ char *readResponse(const char *request, const char *host, unsigned short port)
                         // extended memory initialized to 0
                         memset(response + BUFFER * (counter - 1), 0, BUFFER);
 
-                    } while(read(socket_descriptor, response + BUFFER * (counter - 1), BUFFER) == BUFFER);
+                    } while((bytes = read(socket_descriptor, response + bytes_all, BUFFER)) > 0);
                 }
             }
         }
@@ -1802,7 +1806,7 @@ void checkCsvByPattern(const char *csvDirPattern, const char *logFile)
 
 void printHelp()
 {
-	std::cout << "Usage for skimmer version 1.0.4" << std::endl;
+	std::cout << "Usage for skimmer version 1.0.5" << std::endl;
     std::cout << "\t\t-h print this help message" << std::endl;
     std::cout << "\t\t-c path to configuration file" << std::endl;
     std::cout << "\t\t-s print sample configuration file" << std::endl;
