@@ -302,36 +302,6 @@ const char *extract_json_value(const char *response, const char **json_key, int 
     return value;
 }
 
-int remove_json_entry(const char *response, const char **json_key, int levels)
-{
-    char *value;
-    int index = 1;
-    // not changing the size of memory, only replacing chars
-    if((value = (char *)strstr(response, json_key[0])) == NULL) return -1;
-    for(; index < levels; index++)
-    {
-        if((value = strstr(value, json_key[index])) == NULL) return -1;
-    }
-
-    index = 0;
-    while(*(value + index) != '}' && *(value + index) != ',')
-    {
-        *(value + index) = ' ';
-        index += 1;
-    }
-
-    if(*(value - 1) == ',' && *(value + index) == ',')
-        *(value + index) = ' ';
-
-    else if(*(value - 1) == '{' && *(value + index) == ',')
-        *(value + index) = ' ';
-
-    else if(*(value - 1) == ',' && *(value + index) == '}')
-        *(value - 1) = ' ';
-
-    return 0;
-}
-
 template<typename T>
 std::ostream &operator<<(std::ostream &stream, const std::unordered_map<std::string, T> &map)
 {
@@ -1149,7 +1119,8 @@ class LogstashStats
     const char *logstashIP;
     unsigned short logstashPort;
 
-    int api_stats();
+    std::unordered_map<std::string, uint64_t> api_stats();
+    std::unordered_map<std::string, float> cpu_load();
 
     public:
         LogstashStats(const std::string &_logstashIP, unsigned short _logstashPort): logstashIP(_logstashIP.c_str()), logstashPort(_logstashPort)
@@ -1158,44 +1129,169 @@ class LogstashStats
             api_response = readResponse(logstash_request.c_str(), logstashIP, logstashPort);
             if(api_response == NULL)
                 throw std::runtime_error("Failed to construct LogstashStats object: NULL response");
+            if(getHttpStatus(api_response) != 200)
+                throw std::runtime_error("Failed to construct LogstashStats object: Got != 200 status code");
+            api_response = remove_headers((char **)&api_response);
         };
         ~LogstashStats(){free((char *)api_response);};
 
         std::string get_api_stats()
         {
-            if(api_stats() == -1)
-                throw std::runtime_error("Error in LogstashStats object: Failed to retrieve api stats");
             std::string json_output;
-            json_output = json_output + hostname_ip() + std::string(api_response);
+            json_output = json_output + hostname_ip() + api_stats() + cpu_load();
 
             return json_output;
         };
 };
 
-int LogstashStats::api_stats()
+std::unordered_map<std::string, float> LogstashStats::cpu_load()
 {
-    if(getHttpStatus(api_response) != 200) return -1;
-    api_response = remove_headers((char **)&api_response);
-
+    std::unordered_map<std::string, float> stats;
+    const char *value = NULL;
     union Key{const char *keys[5];};
     Key keys;
 
-    keys = {"\"host\""};
-    remove_json_entry(api_response, keys.keys, 1);
+    keys = {"cpu\":", "load_average\":", "1m\":"};
+    if((value = extract_json_value(api_response, keys.keys, 3)) == NULL) return stats;
+    float cpu_load_average_1m = strtof(value, NULL);
+    stats.insert({"logstash_stats_cpu_load_average_1m", cpu_load_average_1m});
 
-    keys = {"\"version\""};
-    remove_json_entry(api_response, keys.keys, 1);
+    keys = {"cpu\":", "load_average\":", "5m\":"};
+    if((value = extract_json_value(api_response, keys.keys, 3)) == NULL) return stats;
+    float cpu_load_average_5m = strtof(value, NULL);
+    stats.insert({"logstash_stats_cpu_load_average_5m", cpu_load_average_5m});
 
-    keys = {"\"http_address\""};
-    remove_json_entry(api_response, keys.keys, 1);
+    keys = {"cpu\":", "load_average\":", "15m\":"};
+    if((value = extract_json_value(api_response, keys.keys, 3)) == NULL) return stats;
+    float cpu_load_average_15m = strtof(value, NULL);
+    stats.insert({"logstash_stats_cpu_load_average_15m", cpu_load_average_15m});
 
-    keys = {"\"id\""};
-    remove_json_entry(api_response, keys.keys, 1);
+    return stats;
+}
 
-    keys = {"\"name\""};
-    remove_json_entry(api_response, keys.keys, 1);
+std::unordered_map<std::string, uint64_t> LogstashStats::api_stats()
+{
+    std::unordered_map<std::string, uint64_t> stats;
+    const char *value = NULL;
+    union Key{const char *keys[5];};
+    Key keys;
 
-    return 0;
+    keys = {"jvm\":", "threads\":", "count\":"};
+    if((value = extract_json_value(api_response, keys.keys, 3)) == NULL) return stats;
+    uint64_t jvm_threads_count = strtol(value, NULL, 0);
+    stats.insert({"logstash_stats_jvm_threads_count", jvm_threads_count});
+
+    keys = {"jvm\":", "threads\":", "peak_count\":"};
+    if((value = extract_json_value(api_response, keys.keys, 3)) == NULL) return stats;
+    uint64_t jvm_threads_peak_count = strtol(value, NULL, 0);
+    stats.insert({"logstash_stats_jvm_threads_peak_count", jvm_threads_peak_count});
+
+    keys = {"mem\":", "heap_used_percent\":"};
+    if((value = extract_json_value(api_response, keys.keys, 2)) == NULL) return stats;
+    uint64_t mem_heap_used_percent = strtol(value, NULL, 0);
+    stats.insert({"logstash_stats_mem_heap_used_percent", mem_heap_used_percent});
+
+    keys = {"mem\":", "heap_committed_in_bytes\":"};
+    if((value = extract_json_value(api_response, keys.keys, 2)) == NULL) return stats;
+    uint64_t mem_heap_committed_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"logstash_stats_mem_heap_committed_in_bytes", mem_heap_committed_in_bytes});
+
+    keys = {"mem\":", "heap_max_in_bytes\":"};
+    if((value = extract_json_value(api_response, keys.keys, 2)) == NULL) return stats;
+    uint64_t mem_heap_max_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"logstash_stats_mem_heap_max_in_bytes", mem_heap_max_in_bytes});
+
+    keys = {"mem\":", "heap_used_in_bytes\":"};
+    if((value = extract_json_value(api_response, keys.keys, 2)) == NULL) return stats;
+    uint64_t mem_heap_used_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"logstash_stats_mem_heap_used_in_bytes", mem_heap_used_in_bytes});
+
+    keys = {"mem\":", "non_heap_used_in_bytes\":"};
+    if((value = extract_json_value(api_response, keys.keys, 2)) == NULL) return stats;
+    uint64_t mem_non_heap_used_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"logstash_stats_mem_non_heap_used_in_bytes", mem_non_heap_used_in_bytes});
+
+    keys = {"mem\":", "non_heap_committed_in_bytes\":"};
+    if((value = extract_json_value(api_response, keys.keys, 2)) == NULL) return stats;
+    uint64_t mem_non_heap_committed_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"logstash_stats_mem_non_heap_committed_in_bytes", mem_non_heap_committed_in_bytes});
+
+    keys = {"gc\":", "collectors\":", "old\":", "collection_time_in_millis\":"};
+    if((value = extract_json_value(api_response, keys.keys, 4)) == NULL) return stats;
+    uint64_t gc_collectors_old_collection_time_in_millis = strtol(value, NULL, 0);
+    stats.insert({"logstash_stats_gc_collectors_old_collection_time_in_millis", gc_collectors_old_collection_time_in_millis});
+
+    keys = {"gc\":", "collectors\":", "old\":", "collection_count\":"};
+    if((value = extract_json_value(api_response, keys.keys, 4)) == NULL) return stats;
+    uint64_t gc_collectors_old_collection_count = strtol(value, NULL, 0);
+    stats.insert({"logstash_stats_gc_collectors_old_collection_count", gc_collectors_old_collection_count});
+
+    keys = {"gc\":", "collectors\":", "young\":", "collection_time_in_millis\":"};
+    if((value = extract_json_value(api_response, keys.keys, 4)) == NULL) return stats;
+    uint64_t gc_collectors_young_collection_time_in_millis = strtol(value, NULL, 0);
+    stats.insert({"logstash_stats_gc_collectors_young_collection_time_in_millis", gc_collectors_young_collection_time_in_millis});
+
+    keys = {"gc\":", "collectors\":", "young\":", "collection_count\":"};
+    if((value = extract_json_value(api_response, keys.keys, 4)) == NULL) return stats;
+    uint64_t gc_collectors_young_collection_count = strtol(value, NULL, 0);
+    stats.insert({"logstash_stats_gc_collectors_young_collection_count", gc_collectors_young_collection_count});
+
+    keys = {"process\":", "open_file_descriptors\":"};
+    if((value = extract_json_value(api_response, keys.keys, 2)) == NULL) return stats;
+    uint64_t process_open_file_descriptors = strtol(value, NULL, 0);
+    stats.insert({"logstash_stats_process_open_file_descriptors", process_open_file_descriptors});
+
+    keys = {"process\":", "peak_open_file_descriptors\":"};
+    if((value = extract_json_value(api_response, keys.keys, 2)) == NULL) return stats;
+    uint64_t process_peak_open_file_descriptors = strtol(value, NULL, 0);
+    stats.insert({"logstash_stats_process_peak_open_file_descriptors", process_peak_open_file_descriptors});
+
+    keys = {"process\":", "max_file_descriptors\":"};
+    if((value = extract_json_value(api_response, keys.keys, 2)) == NULL) return stats;
+    uint64_t process_max_file_descriptors = strtol(value, NULL, 0);
+    stats.insert({"logstash_stats_process_max_file_descriptors", process_max_file_descriptors});
+
+    keys = {"process\":", "mem\":", "total_virtual_in_bytes\":"};
+    if((value = extract_json_value(api_response, keys.keys, 3)) == NULL) return stats;
+    uint64_t process_mem_total_virtual_in_bytes = strtol(value, NULL, 0);
+    stats.insert({"logstash_stats_process_mem_total_virtual_in_bytes", process_mem_total_virtual_in_bytes});
+
+    keys = {"cpu\":", "total_in_millis\":"};
+    if((value = extract_json_value(api_response, keys.keys, 2)) == NULL) return stats;
+    uint64_t cpu_total_in_millis = strtol(value, NULL, 0);
+    stats.insert({"logstash_stats_cpu_total_in_millis", cpu_total_in_millis});
+
+    keys = {"cpu\":", "percent\":"};
+    if((value = extract_json_value(api_response, keys.keys, 2)) == NULL) return stats;
+    uint64_t cpu_percent = strtol(value, NULL, 0);
+    stats.insert({"logstash_stats_cpu_percent", cpu_percent});
+
+    keys = {"events\":", "in\":"};
+    if((value = extract_json_value(api_response, keys.keys, 2)) == NULL) return stats;
+    uint64_t events_in = strtol(value, NULL, 0);
+    stats.insert({"logstash_stats_events_in", events_in});
+
+    keys = {"events\":", "filtered\":"};
+    if((value = extract_json_value(api_response, keys.keys, 2)) == NULL) return stats;
+    uint64_t events_filtered = strtol(value, NULL, 0);
+    stats.insert({"logstash_stats_events_filtered", events_filtered});
+
+    keys = {"events\":", "out\":"};
+    if((value = extract_json_value(api_response, keys.keys, 2)) == NULL) return stats;
+    uint64_t events_out = strtol(value, NULL, 0);
+    stats.insert({"logstash_stats_events_out", events_out});
+
+    keys = {"events\":", "duration_in_millis\":"};
+    if((value = extract_json_value(api_response, keys.keys, 2)) == NULL) return stats;
+    uint64_t events_duration_in_millis = strtol(value, NULL, 0);
+    stats.insert({"logstash_stats_events_duration_in_millis", events_duration_in_millis});
+
+    keys = {"events\":", "queue_push_duration_in_millis\":"};
+    if((value = extract_json_value(api_response, keys.keys, 2)) == NULL) return stats;
+    uint64_t events_queue_push_duration_in_millis = strtol(value, NULL, 0);
+    stats.insert({"logstash_stats_events_queue_push_duration_in_millis", events_queue_push_duration_in_millis});
+
+    return stats;
 }
 
 /****** END OF LOGSTASH API CLASS ******/
