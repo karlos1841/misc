@@ -9,6 +9,7 @@
  * 1.0.3 - code cleanup
  * 1.0.4 - configuration options moved to file
  * 1.0.5 - added logstash api + bugfix in readResponse
+ * 1.0.6 - added index_freq option
 */
 #define _XOPEN_SOURCE 700 // POSIX 2008
 #include <iostream>
@@ -1637,13 +1638,13 @@ int writeToLog(const char *filename, const char *message)
         return 0;
 }
 
-void appendDateNow(std::string &arg)
+void appendDateNow(std::string &arg, const char *dateFormat)
 {
 	struct tm *timeinfo;
 	time_t rawtime = time(NULL);
 	char timestamp[20];
 	timeinfo = gmtime(&rawtime);
-	strftime(timestamp, sizeof(timestamp), "%Y.%m.%d", timeinfo);
+	strftime(timestamp, sizeof(timestamp), dateFormat, timeinfo);
 	arg = arg + "-" + timestamp;
 }
 
@@ -1806,7 +1807,7 @@ void checkCsvByPattern(const char *csvDirPattern, const char *logFile)
 
 void printHelp()
 {
-	std::cout << "Usage for skimmer version 1.0.5" << std::endl;
+	std::cout << "Usage for skimmer version 1.0.6" << std::endl;
     std::cout << "\t\t-h print this help message" << std::endl;
     std::cout << "\t\t-c path to configuration file" << std::endl;
     std::cout << "\t\t-s print sample configuration file" << std::endl;
@@ -1816,7 +1817,7 @@ void printSampleConfig()
 {
     std::cout << "\t\t# index name in elasticsearch" << std::endl;
     std::cout << "\t\tindex_name = skimmer" << std::endl;
-    std::cout << "\t\tindex_daily = true" << std::endl << std::endl;
+    std::cout << "\t\tindex_freq = monthly" << std::endl << std::endl;
 
     std::cout << "\t\t# type in elasticsearch index" << std::endl;
     std::cout << "\t\tindex_type = _doc" << std::endl << std::endl;
@@ -1869,6 +1870,7 @@ struct Args
     std::string logstashIPApi;
     size_t logstashPortApi;
     bool daemonize;
+	std::string indexFreq;
 
     std::vector<std::string> systemdS;
     std::vector<std::string> os;
@@ -1898,7 +1900,7 @@ int Args::readConfig(const char *filename)
     std::size_t found;
     const std::string opt[] = {
         "index_name",
-        "index_daily",
+        "index_freq",
         "index_type",
         "elasticsearch_auth",
         "elasticsearch_address",
@@ -1939,8 +1941,7 @@ int Args::readConfig(const char *filename)
                     indexName = value;
                 break;
                 case 1:
-                    if(value == "true")
-                        appendDateNow(indexName);
+                    indexFreq = value;
                 break;
                 case 2:
                     indexType = value;
@@ -2079,7 +2080,12 @@ int Args::readConfig(const char *filename)
         }
     }
 
-    std::string msg = "Configuration Options: \nIndex Name: " + indexName +
+	std::string tmp = indexName;
+    if(indexFreq == "daily")
+        appendDateNow(tmp, "%Y.%m.%d");
+    else if(indexFreq == "monthly")
+        appendDateNow(tmp, "%Y.%m");
+    std::string msg = "Configuration Options: \nIndex Name: " + tmp +
                         "\nIndex Type: " + indexType +
                         "\nElasticsearch Auth: " + base64auth +
                         "\nDaemonize: " + std::to_string(daemonize) +
@@ -2175,6 +2181,11 @@ int main(int argc, char *argv[])
         pid_t pid = fork();
         if(pid == 0) 
         {
+			if(arg.indexFreq == "daily")
+                appendDateNow(arg.indexName, "%Y.%m.%d");
+            else if(arg.indexFreq == "monthly")
+                appendDateNow(arg.indexName, "%Y.%m");
+
             // Stats common for all nodes
             std::string ip = hostname_ip()["source_node_ip"];
             std::string os_stats;
