@@ -1,0 +1,42 @@
+{
+    "app-id": "org.brosix.Brosix",
+    "runtime": "org.freedesktop.Platform",
+    "runtime-version": "19.08",
+    "sdk": "org.freedesktop.Sdk",
+    "command": "Brosix.sh",
+    "finish-args": [
+        "--share=ipc",
+        "--share=network",
+        "--socket=pulseaudio",
+        "--socket=x11",
+        "--socket=wayland",
+        "--device=all",
+        "--filesystem=home:rw"
+    ],
+    "modules": [
+        {
+            "name": "Brosix",
+            "buildsystem": "simple",
+            "build-commands": [
+                "mkdir -p /app/bin;cp -rf * /app/bin",
+                "mkdir -p /app/lib;cp -rf libs/* /app/lib",
+                "mkdir -p /app/share/applications;mv org.brosix.Brosix.desktop /app/share/applications",
+                "mkdir -p /app/share/icons/hicolor/64x64/apps;mv org.brosix.Brosix.png /app/share/icons/hicolor/64x64/apps"
+            ],
+            "sources": [
+                {
+                    "type": "archive",
+                    "path": "Brosix_x64.tar.gz"
+                },
+		{
+		    "type": "dir",
+		    "path": "misc"
+		},
+		{
+		    "type": "dir",
+		    "path": "stretch-lib"
+		}
+            ]
+        }
+    ]
+}
