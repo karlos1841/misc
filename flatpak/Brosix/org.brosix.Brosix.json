@@ -20,7 +20,7 @@
             "build-commands": [
                 "mkdir -p /app/share/applications;mv org.brosix.Brosix.desktop /app/share/applications",
                 "mkdir -p /app/share/icons/hicolor/64x64/apps;mv org.brosix.Brosix.png /app/share/icons/hicolor/64x64/apps",
-                "mkdir -p /app/bin;cp -rf * /app/bin",
+                "mkdir -p /app/bin;cp -rf * /app/bin;ln -s /tmp/Brosix /app/bin/users",
                 "mkdir -p /app/lib;cp -rf libs/* /app/lib"
             ],
             "sources": [
@@ -35,7 +35,14 @@
 		{
 		    "type": "dir",
 		    "path": "stretch-lib"
-		}
+		},
+		{
+                    "type": "script",
+                    "dest-filename": "Brosix.sh",
+                    "commands": [
+                        "if [ ! -e \"/tmp/Brosix\" ]; then ln -s $XDG_DATA_HOME /tmp/Brosix; fi; exec /app/bin/Brosix"
+                    ]
+                }
             ]
         }
     ]
