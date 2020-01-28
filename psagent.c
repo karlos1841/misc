@@ -129,7 +129,7 @@ void runClient(int argc, char *argv[])
     }
 
     /* path to psagent.ps1 */
-    size_t file_path_s = strlen(appdata) + 20;
+    size_t file_path_s = strlen(appdata) + BUFFER;
     char *ps1_path = malloc(file_path_s * sizeof(char));
     if(ps1_path == NULL)
     {
@@ -166,7 +166,7 @@ void runClient(int argc, char *argv[])
     snprintf(dat_path, file_path_s, "%s\\psagent.dat", appdata);
 
     /* run psagent.ps1 and redirect output to psagent.dat */
-    size_t cmd_s = strlen(ps1_path) + strlen(dat_path) + 100;
+    size_t cmd_s = strlen(ps1_path) + strlen(dat_path) + BUFFER;
     char *cmd = malloc(cmd_s * sizeof(char));
     if(cmd == NULL)
     {
@@ -175,7 +175,7 @@ void runClient(int argc, char *argv[])
         free(ps1_path);
         return;
     }
-    snprintf(cmd, cmd_s, "powershell -command \"& %s | Out-File -Encoding unicode -FilePath %s\"", ps1_path, dat_path);
+    snprintf(cmd, cmd_s, "powershell -command \"Set-ExecutionPolicy -ExecutionPolicy Unrestricted -Scope CurrentUser ; %s 2>&1 | Out-File -Encoding unicode -FilePath %s\"", ps1_path, dat_path);
 
     system(cmd);
     free(cmd);
