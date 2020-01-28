@@ -1,5 +1,6 @@
 /*
- * gcc -std=c11 -pedantic -Wall -Wextra psagent.c -o psagent
+ * Windows
+ * gcc -std=c11 -pedantic -Wall -Wextra psagent.c -o psagent -lws2_32
  *
  * Author: karol.wozniak@it.emca.pl
  * 
@@ -8,18 +9,25 @@
  * 
  */
 
+#ifdef _WIN32
+    #define CLIENT
+    #define _WIN32_WINNT 0x0501
+    #include <windows.h>
+    #include <winsock2.h>
+    #include <ws2tcpip.h>
+#else
+    #define SERVER
+    #define _XOPEN_SOURCE 700 // POSIX 2008
+    #include <sys/types.h>
+    #include <sys/socket.h>
+    #include <netdb.h>
+#endif
+
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <wchar.h>
 #include <locale.h>
-
-#ifdef _WIN32
-    #define CLIENT
-#else
-    #define SERVER
-#endif
-
 
 #define CMD_BUF 2048
 #define HOST_MAX 256
@@ -64,6 +72,25 @@ char *readFromFile(FILE* f)
     return cmd_output;
 }
 
+unsigned long hostnameToIP(const char *hostname)
+{
+	struct addrinfo hints, *info;
+	struct sockaddr_in *s;
+	unsigned long IP = 0;
+
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_INET;
+
+	if(getaddrinfo(hostname, NULL, &hints, &info) != 0)
+		return 0;
+
+	s = (struct sockaddr_in *)info->ai_addr;
+	IP = s->sin_addr.s_addr;
+	freeaddrinfo(info);
+
+	return IP;
+}
+
 #ifdef SERVER
 void runServer(int argc, char *argv[])
 {
@@ -78,6 +105,86 @@ void runServer(int argc, char *argv[])
 #endif
 
 #ifdef CLIENT
+int writeToSocket(SOCKET *s, const char *str)
+{
+    size_t str_s = strlen(str);
+
+    if(send(*s, str, str_s, 0) != str_s)
+        return -1;
+
+    return 0;
+}
+
+char *readFromSocket(SOCKET *s)
+{
+    char *cmd_output = NULL;
+    unsigned long counter = 0;
+    char *tmp;
+    int bytes = 0;
+    int bytes_all = 0;
+
+    do
+    {
+        counter += 1;
+        bytes_all += bytes;
+        tmp = realloc(cmd_output, BUFFER * counter);
+        if(tmp == NULL)
+        {
+            free(cmd_output);
+            cmd_output = NULL;
+            break;
+        }
+
+        cmd_output = tmp;
+        // extended memory initialized to 0
+        memset(cmd_output + BUFFER * (counter - 1), 0, BUFFER);
+
+    } while((bytes = recv(*s, cmd_output + bytes_all, BUFFER, 0)) > 0);
+
+    return cmd_output;
+}
+
+int establishConnection(SOCKET *s, const char *host, unsigned short port)
+{
+    WSADATA wsa;
+    struct sockaddr_in server_info;
+
+    if(WSAStartup(MAKEWORD(2,2), &wsa) != 0)
+    {
+        printf("Failed to initialize Winsock\n");
+        return -1;
+    }
+
+    if((*s = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET)
+    {
+        printf("Could not create socket\n");
+        return -1;
+    }
+
+    memset(&server_info, 0, sizeof(server_info));
+    server_info.sin_family = AF_INET;
+    server_info.sin_port = htons(port);
+    if((server_info.sin_addr.s_addr = hostnameToIP(host)) == 0)
+    {
+        printf("Could not convert hostname to IP\n");
+        return -1;
+    }
+
+    printf("Waiting for server to come up\n");
+    while(connect(*s, (struct sockaddr *)&server_info, sizeof(server_info)) != 0)
+        Sleep(1000);
+
+    printf("Established connection to server\n");
+
+    return 0;
+}
+
+void closeConnection(SOCKET *s)
+{
+    closesocket(*s);
+    WSACleanup();
+}
+
 void runClient(int argc, char *argv[])
 {
     char hostname[HOST_MAX] = {0};
@@ -118,13 +225,29 @@ void runClient(int argc, char *argv[])
     /* set powershell as default shell */
     _putenv("COMSPEC=powershell");
 
-    const char *command = "hostname";
+    /* get command/script from remote host */
+    SOCKET s;
+    if(establishConnection(&s, hostname, port) != 0)
+    {
+        printf("Failed to set up connection\n");
+        closeConnection(&s);
+        return;
+    }
+    char *command = readFromSocket(&s);
+    if(command == NULL)
+    {
+        printf("Reading command from remote host failed\n");
+        closeConnection(&s);
+        return NULL;
+    }
 
     /* get APPDATA path */
     const char *appdata = getenv("APPDATA");
     if(appdata == NULL)
     {
         printf("Error occurred while trying to find APPDATA\n");
+        free(command);
+        closeConnection(&s);
         return;
     }
 
@@ -134,6 +257,8 @@ void runClient(int argc, char *argv[])
     if(ps1_path == NULL)
     {
         printf("Error occurred while trying to allocate memory\n");
+        free(command);
+        closeConnection(&s);
         return;
     }
     snprintf(ps1_path, file_path_s, "%s\\psagent.ps1", appdata);
@@ -144,6 +269,8 @@ void runClient(int argc, char *argv[])
     {
         printf("Error occurred while trying to open file for writing\n");
         free(ps1_path);
+        free(command);
+        closeConnection(&s);
         return;
     }
     if(writeToFile(fout, command) != 0)
@@ -151,8 +278,12 @@ void runClient(int argc, char *argv[])
         printf("Error occurred while trying to write to file\n");
         fclose(fout);
         free(ps1_path);
+        free(command);
+        closeConnection(&s);
         return;
     }
+    /* command no longer needed */
+    free(command);
     fclose(fout);
 
     /* path to psagent.dat */
@@ -161,6 +292,7 @@ void runClient(int argc, char *argv[])
     {
         printf("Error occurred while trying to allocate memory\n");
         free(ps1_path);
+        closeConnection(&s);
         return;
     }
     snprintf(dat_path, file_path_s, "%s\\psagent.dat", appdata);
@@ -173,9 +305,10 @@ void runClient(int argc, char *argv[])
         printf("Error occurred while trying to allocate memory\n");
         free(dat_path);
         free(ps1_path);
+        closeConnection(&s);
         return;
     }
-    snprintf(cmd, cmd_s, "powershell -command \"Set-ExecutionPolicy -ExecutionPolicy Unrestricted -Scope CurrentUser ; %s 2>&1 | Out-File -Encoding unicode -FilePath %s\"", ps1_path, dat_path);
+    snprintf(cmd, cmd_s, "powershell -executionpolicy bypass -command \"& %s 2>&1 | Out-File -Encoding unicode -FilePath %s\"", ps1_path, dat_path);
 
     system(cmd);
     free(cmd);
@@ -187,6 +320,7 @@ void runClient(int argc, char *argv[])
     {
         printf("Error occurred while trying to allocate memory\n");
         free(dat_path);
+        closeConnection(&s);
         return;
     }
     mbsrtowcs(dat_path_w, (const char **)&dat_path, file_path_s * sizeof(wchar_t) - 1, NULL);
@@ -196,6 +330,7 @@ void runClient(int argc, char *argv[])
         printf("Error occurred while trying to open file with ps output\n");
         free(dat_path_w);
         free(dat_path);
+        closeConnection(&s);
         return;
     }
 
@@ -206,15 +341,27 @@ void runClient(int argc, char *argv[])
         fclose(fin);
         free(dat_path_w);
         free(dat_path);
+        closeConnection(&s);
         return;
     }
 
-    fputws((wchar_t *)cmd_output, stdout);
+    //fputws((wchar_t *)cmd_output, stdout);
+    if(writeToSocket(&s, cmd_output) != 0)
+    {
+        printf("Writing to socket failed\n");
+        fclose(fin);
+        free(cmd_output);
+        free(dat_path_w);
+        free(dat_path);
+        closeConnection(&s);
+        return;
+    }
 
     fclose(fin);
     free(cmd_output);
     free(dat_path_w);
     free(dat_path);
+    closeConnection(&s);
 }
 #else
 void runClient(int argc, char *argv[])
