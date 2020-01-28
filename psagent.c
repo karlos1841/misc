@@ -25,6 +25,45 @@
 #define HOST_MAX 256
 #define BUFFER 1024
 
+int writeToFile(FILE *f, const char *str)
+{
+    size_t str_s = strlen(str);
+
+    if(fwrite(str, sizeof(char), str_s, f) != str_s)
+        return -1;
+
+    return 0;
+}
+
+char *readFromFile(FILE* f)
+{
+    char *cmd_output = NULL;
+    unsigned long counter = 0;
+    char *tmp;
+    int bytes = 0;
+    int bytes_all = 0;
+
+    do
+    {
+        counter += 1;
+        bytes_all += bytes;
+        tmp = realloc(cmd_output, BUFFER * counter);
+        if(tmp == NULL)
+        {
+            free(cmd_output);
+            cmd_output = NULL;
+            break;
+        }
+
+        cmd_output = tmp;
+        // extended memory initialized to 0
+        memset(cmd_output + BUFFER * (counter - 1), 0, BUFFER);
+
+    } while((bytes = fread(cmd_output + bytes_all, sizeof(char), BUFFER, f)) > 0);
+
+    return cmd_output;
+}
+
 #ifdef SERVER
 void runServer(int argc, char *argv[])
 {
@@ -80,7 +119,8 @@ void runClient(int argc, char *argv[])
     _putenv("COMSPEC=powershell");
 
     const char *command = "hostname";
-    /* redirect cmd output to %APPDATA%\psagent.dat */
+
+    /* get APPDATA path */
     const char *appdata = getenv("APPDATA");
     if(appdata == NULL)
     {
@@ -88,86 +128,93 @@ void runClient(int argc, char *argv[])
         return;
     }
 
+    /* path to psagent.ps1 */
     size_t file_path_s = strlen(appdata) + 20;
-    char *file_path = malloc(file_path_s * sizeof(char));
-    if(file_path == NULL)
+    char *ps1_path = malloc(file_path_s * sizeof(char));
+    if(ps1_path == NULL)
     {
         printf("Error occurred while trying to allocate memory\n");
         return;
     }
-    snprintf(file_path, file_path_s, "%s\\psagent.dat", appdata);
-    /* file_path now points to %APPDATA%\psagent.dat */
+    snprintf(ps1_path, file_path_s, "%s\\psagent.ps1", appdata);
 
-    size_t cmd_s = CMD_BUF + strlen(file_path) + 100;
+    /* write command/script to psagent.ps1 */
+    FILE *fout = fopen(ps1_path, "w");
+    if(fout == NULL)
+    {
+        printf("Error occurred while trying to open file for writing\n");
+        free(ps1_path);
+        return;
+    }
+    if(writeToFile(fout, command) != 0)
+    {
+        printf("Error occurred while trying to write to file\n");
+        fclose(fout);
+        free(ps1_path);
+        return;
+    }
+    fclose(fout);
+
+    /* path to psagent.dat */
+    char *dat_path = malloc(file_path_s * sizeof(char));
+    if(dat_path == NULL)
+    {
+        printf("Error occurred while trying to allocate memory\n");
+        free(ps1_path);
+        return;
+    }
+    snprintf(dat_path, file_path_s, "%s\\psagent.dat", appdata);
+
+    /* run psagent.ps1 and redirect output to psagent.dat */
+    size_t cmd_s = strlen(ps1_path) + strlen(dat_path) + 100;
     char *cmd = malloc(cmd_s * sizeof(char));
     if(cmd == NULL)
     {
         printf("Error occurred while trying to allocate memory\n");
-        free(file_path);
+        free(dat_path);
+        free(ps1_path);
         return;
     }
-    snprintf(cmd, cmd_s, "powershell -command \"%s | Out-File -Encoding unicode -FilePath %s\"", command, file_path);
-    /* cmd now points to the ps command */
+    snprintf(cmd, cmd_s, "powershell -command \"& %s | Out-File -Encoding unicode -FilePath %s\"", ps1_path, dat_path);
 
     system(cmd);
     free(cmd);
+    free(ps1_path);
 
-    /* read unicode file to memory */
-    wchar_t *file_path_w = calloc(file_path_s, sizeof(wchar_t));
-    if(file_path_w == NULL)
+    /* read psagent.dat to memory */
+    wchar_t *dat_path_w = calloc(file_path_s, sizeof(wchar_t));
+    if(dat_path_w == NULL)
     {
         printf("Error occurred while trying to allocate memory\n");
-        free(file_path);
+        free(dat_path);
         return;
     }
-    mbsrtowcs(file_path_w, (const char **)&file_path, file_path_s * sizeof(wchar_t) - 1, NULL);
-    FILE *f = _wfopen(file_path_w, L"rt,ccs=UNICODE");
-    if(f == NULL)
+    mbsrtowcs(dat_path_w, (const char **)&dat_path, file_path_s * sizeof(wchar_t) - 1, NULL);
+    FILE *fin = _wfopen(dat_path_w, L"rt,ccs=UNICODE");
+    if(fin == NULL)
     {
         printf("Error occurred while trying to open file with ps output\n");
-        free(file_path_w);
-        free(file_path);
+        free(dat_path_w);
+        free(dat_path);
         return;
     }
 
-    char *cmd_output = NULL;
-    unsigned long counter = 0;
-    char *tmp;
-    int bytes = 0;
-    int bytes_all = 0;
-
-    do
-    {
-        counter += 1;
-        bytes_all += bytes;
-        tmp = realloc(cmd_output, BUFFER * counter);
-        if(tmp == NULL)
-        {
-            free(cmd_output);
-            cmd_output = NULL;
-            break;
-        }
-
-        cmd_output = tmp;
-        // extended memory initialized to 0
-        memset(cmd_output + BUFFER * (counter - 1), 0, BUFFER);
-
-    } while((bytes = fread(cmd_output + bytes_all, sizeof(char), BUFFER, f)) > 0);
+    char *cmd_output = readFromFile(fin);
     if(cmd_output == NULL)
     {
-        printf("Error occurred while allocating memory for cmd output\n");
-        free(file_path_w);
-        free(file_path);
+        printf("Error occurred while reading from file\n");
+        fclose(fin);
+        free(dat_path_w);
+        free(dat_path);
         return;
     }
-    /* cmd_output points to data read from file_path */
 
     fputws((wchar_t *)cmd_output, stdout);
 
-    fclose(f);
+    fclose(fin);
     free(cmd_output);
-    free(file_path_w);
-    free(file_path);
+    free(dat_path_w);
+    free(dat_path);
 }
 #else
 void runClient(int argc, char *argv[])
