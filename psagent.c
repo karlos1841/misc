@@ -17,10 +17,13 @@
     #include <ws2tcpip.h>
 #else
     #define SERVER
-    #define _XOPEN_SOURCE 700 // POSIX 2008
+    #define _DEFAULT_SOURCE
     #include <sys/types.h>
     #include <sys/socket.h>
+    #include <netinet/in.h>
+    #include <arpa/inet.h>
     #include <netdb.h>
+    #include <unistd.h>
 #endif
 
 #include <stdio.h>
@@ -29,7 +32,7 @@
 #include <wchar.h>
 #include <locale.h>
 
-#define CMD_BUF 2048
+#define MOD_BUF 2048 // modifiable buffer
 #define HOST_MAX 256
 #define BUFFER 1024
 
@@ -92,9 +95,166 @@ unsigned long hostnameToIP(const char *hostname)
 }
 
 #ifdef SERVER
+int writeToSocket(int *s, const char *str)
+{
+    ssize_t str_s = strlen(str);
+
+    if(write(*s, str, str_s) != str_s)
+        return -1;
+
+    return 0;
+}
+char *readFromSocket(int *s)
+{
+    char *cmd_output = NULL;
+    unsigned long counter = 0;
+    char *tmp;
+    int bytes = 0;
+    int bytes_all = 0;
+
+    do
+    {
+        counter += 1;
+        bytes_all += bytes;
+        tmp = realloc(cmd_output, BUFFER * counter);
+        if(tmp == NULL)
+        {
+            free(cmd_output);
+            cmd_output = NULL;
+            break;
+        }
+
+        cmd_output = tmp;
+        // extended memory initialized to 0
+        memset(cmd_output + BUFFER * (counter - 1), 0, BUFFER);
+
+    } while((bytes = read(*s, cmd_output + bytes_all, BUFFER)) > 0);
+
+    return cmd_output;
+}
+int acceptConnection(int *s, int *peer_s, const char *host, unsigned short port)
+{
+    struct sockaddr_in address;
+
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    if(inet_aton(host, &address.sin_addr) == 0) return -1;
+
+    if((*s = socket(AF_INET, SOCK_STREAM, 0)) == -1){perror("");return -1;}
+
+    if(bind(*s, (const struct sockaddr *)&address, sizeof(address)) == -1){perror("");return -1;}
+
+    if(listen(*s, 1) == -1){perror("");return -1;}
+
+    struct sockaddr_in peer_addr;
+    socklen_t peer_addr_len = sizeof(peer_addr);
+
+    if((*peer_s = accept(*s, (struct sockaddr *)&peer_addr, &peer_addr_len)) == -1) return -1;
+
+    return 0;
+}
 void runServer(int argc, char *argv[])
 {
+    char *buffer = NULL;
+    unsigned short port = 0;
+    for(int i = 1; i < argc; i++)
+    {
+        if(!strcmp("-p", argv[i]))
+        {
+            if(argv[i + 1] != NULL)
+            {
+                char port_s[6];
+                snprintf(port_s, 6, "%s", argv[i + 1]);
+                port = strtol(port_s, NULL, 0);
+            }
+            else
+                break;
+        }
+    }
+    for(int i = 1; i < argc; i++)
+    {
+        if(!strcmp("-c", argv[i]))
+        {
+            if(argv[i + 1] != NULL)
+            {
+                if(strlen(argv[i + 1]) > MOD_BUF - 1)
+                {
+                    printf("Command must not exceed %d characters\n", MOD_BUF - 1);
+                    return;
+                }
+                buffer = malloc(MOD_BUF * sizeof(char));
+                snprintf(buffer, MOD_BUF, "%s", argv[i + 1]);
+                /* -c option found, ignore others in the loop */
+                break;
+            }
+            else
+                break;
+        }
+        else if(!strcmp("-s", argv[i]))
+        {
+            if(argv[i + 1] != NULL)
+            {
+                if(strlen(argv[i + 1]) > MOD_BUF - 1)
+                {
+                    printf("File name must not exceed %d characters\n", MOD_BUF - 1);
+                    return;
+                }
+                buffer = malloc(MOD_BUF * sizeof(char));
+                snprintf(buffer, MOD_BUF, "%s", argv[i + 1]);
+                FILE *f = fopen(buffer, "r");
+                if(f == NULL)
+                {
+                    printf("Could not open script file\n");
+                    fclose(f);
+                    return;
+                }
+
+                free(buffer);
+                buffer = readFromFile(f);
+                fclose(f);
+                /* -s option found, ignore others in the loop */
+                break;
+            }
+            else
+                break;
+        }
+    }
+
+    if(buffer == NULL || port == 0)
+    {
+        printf("Error occurred while parsing arguments\n");
+        return;
+    }
+
     printf("Running in server mode\n");
+    printf("Listening on port: %d\n", port);
+
+    printf("Waiting for client to connect\n");
+    int s, peer_s;
+    if(acceptConnection(&s, &peer_s, "0.0.0.0", port) != 0)
+    {
+        printf("Setting up listener failed\n");
+        return;
+    }
+    printf("Client connected\n");
+
+    /* send command/script to client */
+    writeToSocket(&peer_s, buffer);
+
+    /* retrieve output from client */
+    char *command = readFromSocket(&peer_s);
+    if(command == NULL)
+    {
+        printf("Reading command from client failed\n");
+        return;
+    }
+
+    fputws((wchar_t *)command, stdout);
+
+    free(buffer);
+    free(command);
+    close(peer_s); close(s);
 }
 #else
 void runServer(int argc, char *argv[])
@@ -192,7 +352,7 @@ void runClient(int argc, char *argv[])
 
     for(int i = 1; i < argc; i++)
     {
-        if(!(strcmp("-s", argv[i])))
+        if(!(strcmp("-i", argv[i])))
         {
             if(argv[i + 1] != NULL)
                 snprintf(hostname, HOST_MAX, "%s", argv[i + 1]);
@@ -378,8 +538,9 @@ void printHelp()
     printf("\nServer options\n");
     printf("\t\t-p - port to listen on for connections\n");
     printf("\t\t-c - ps command to run on remote host\n");
+    printf("\t\t-s - ps script to run on remote host\n");
     printf("\nClient options\n");
-    printf("\t\t-s - server's hostname\n");
+    printf("\t\t-i - server's IP\n");
     printf("\t\t-p - server's port\n");
 }
 
