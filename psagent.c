@@ -38,9 +38,7 @@
 
 int writeToFile(FILE *f, const char *str)
 {
-    size_t str_s = strlen(str);
-
-    if(fwrite(str, sizeof(char), str_s, f) != str_s)
+    if(fputs(str, f) < 0)
         return -1;
 
     return 0;
@@ -48,9 +46,9 @@ int writeToFile(FILE *f, const char *str)
 
 char *readFromFile(FILE* f)
 {
-    char *cmd_output = NULL;
-    unsigned long counter = 0;
-    char *tmp;
+    char *buffer = NULL;
+    char *ptr = NULL;
+    size_t counter = 0;
     int bytes = 0;
     int bytes_all = 0;
 
@@ -58,21 +56,40 @@ char *readFromFile(FILE* f)
     {
         counter += 1;
         bytes_all += bytes;
-        tmp = realloc(cmd_output, BUFFER * counter);
-        if(tmp == NULL)
-        {
-            free(cmd_output);
-            cmd_output = NULL;
-            break;
-        }
+        ptr = realloc(buffer, BUFFER * counter);
+        if(ptr == NULL) {free(buffer); return NULL;}
 
-        cmd_output = tmp;
+        buffer = ptr;
         // extended memory initialized to 0
-        memset(cmd_output + BUFFER * (counter - 1), 0, BUFFER);
+        memset(buffer + BUFFER * (counter - 1), 0, BUFFER);
 
-    } while((bytes = fread(cmd_output + bytes_all, sizeof(char), BUFFER, f)) > 0);
+    } while((bytes = fread(buffer + bytes_all, sizeof(char), BUFFER, f)) > 0);
 
-    return cmd_output;
+    return buffer;
+}
+
+wchar_t *readWcFromFile(FILE* f)
+{
+    wchar_t *buffer = NULL;
+    wchar_t *ptr = NULL;
+    size_t counter = 0;
+    int count = 0;
+    int count_all = 0;
+
+    do
+    {
+        counter += 1;
+        count_all += count;
+        ptr = realloc(buffer, BUFFER * sizeof(wchar_t) * counter);
+        if(ptr == NULL) { free(buffer); return NULL; }
+
+        buffer = ptr;
+        // extended memory initialized to 0
+        wmemset(buffer + BUFFER * (counter - 1), 0, BUFFER);
+
+    } while( (count = fread(buffer + count_all, sizeof(wchar_t), BUFFER, f)) > 0 );
+
+    return buffer;
 }
 
 unsigned long hostnameToIP(const char *hostname)
@@ -95,20 +112,20 @@ unsigned long hostnameToIP(const char *hostname)
 }
 
 #ifdef SERVER
-int writeToSocket(int *s, const char *str)
+void writeToSocket(int *s, const char *str)
 {
-    ssize_t str_s = strlen(str);
-
-    if(write(*s, str, str_s) != str_s)
-        return -1;
-
-    return 0;
+    while(*str)
+    {
+        write(*s, str, sizeof(char));
+        ++str;
+    }
+    write(*s, "\0", sizeof(char));
 }
 char *readFromSocket(int *s)
 {
-    char *cmd_output = NULL;
-    unsigned long counter = 0;
-    char *tmp;
+    char *buffer = NULL;
+    char *ptr = NULL;
+    size_t counter = 0;
     int bytes = 0;
     int bytes_all = 0;
 
@@ -116,21 +133,16 @@ char *readFromSocket(int *s)
     {
         counter += 1;
         bytes_all += bytes;
-        tmp = realloc(cmd_output, BUFFER * counter);
-        if(tmp == NULL)
-        {
-            free(cmd_output);
-            cmd_output = NULL;
-            break;
-        }
+        ptr = realloc(buffer, BUFFER * counter);
+        if(ptr == NULL) {free(buffer); return NULL;}
 
-        cmd_output = tmp;
+        buffer = ptr;
         // extended memory initialized to 0
-        memset(cmd_output + BUFFER * (counter - 1), 0, BUFFER);
+        memset(buffer + BUFFER * (counter - 1), 0, BUFFER);
 
-    } while((bytes = read(*s, cmd_output + bytes_all, BUFFER)) > 0);
+    } while((bytes = read(*s, buffer + bytes_all, BUFFER)) > 0);
 
-    return cmd_output;
+    return buffer;
 }
 int acceptConnection(int *s, int *peer_s, const char *host, unsigned short port)
 {
@@ -141,11 +153,11 @@ int acceptConnection(int *s, int *peer_s, const char *host, unsigned short port)
     address.sin_port = htons(port);
     if(inet_aton(host, &address.sin_addr) == 0) return -1;
 
-    if((*s = socket(AF_INET, SOCK_STREAM, 0)) == -1){perror("");return -1;}
+    if((*s = socket(AF_INET, SOCK_STREAM, 0)) == -1) return -1;
 
-    if(bind(*s, (const struct sockaddr *)&address, sizeof(address)) == -1){perror("");return -1;}
+    if(bind(*s, (const struct sockaddr *)&address, sizeof(address)) == -1) return -1;
 
-    if(listen(*s, 1) == -1){perror("");return -1;}
+    if(listen(*s, 1) == -1) return -1;
 
     struct sockaddr_in peer_addr;
     socklen_t peer_addr_len = sizeof(peer_addr);
@@ -153,6 +165,17 @@ int acceptConnection(int *s, int *peer_s, const char *host, unsigned short port)
     if((*peer_s = accept(*s, (struct sockaddr *)&peer_addr, &peer_addr_len)) == -1) return -1;
 
     return 0;
+}
+void printConvWc(const char *command)
+{
+    size_t len;
+    wchar_t wc;
+    while(*command)
+    {
+        len = mbrtowc(&wc, command, MB_CUR_MAX, NULL);
+        printf("%lc", wc);
+        command += len;
+    }
 }
 void runServer(int argc, char *argv[])
 {
@@ -180,7 +203,7 @@ void runServer(int argc, char *argv[])
             {
                 if(strlen(argv[i + 1]) > MOD_BUF - 1)
                 {
-                    printf("Command must not exceed %d characters\n", MOD_BUF - 1);
+                    fprintf(stderr, "Command must not exceed %d characters\n", MOD_BUF - 1);
                     return;
                 }
                 buffer = malloc(MOD_BUF * sizeof(char));
@@ -197,7 +220,7 @@ void runServer(int argc, char *argv[])
             {
                 if(strlen(argv[i + 1]) > MOD_BUF - 1)
                 {
-                    printf("File name must not exceed %d characters\n", MOD_BUF - 1);
+                    fprintf(stderr, "File name must not exceed %d characters\n", MOD_BUF - 1);
                     return;
                 }
                 buffer = malloc(MOD_BUF * sizeof(char));
@@ -205,8 +228,8 @@ void runServer(int argc, char *argv[])
                 FILE *f = fopen(buffer, "r");
                 if(f == NULL)
                 {
-                    printf("Could not open script file\n");
-                    fclose(f);
+                    fprintf(stderr, "Could not open script file\n");
+                    free(buffer);
                     return;
                 }
 
@@ -223,38 +246,45 @@ void runServer(int argc, char *argv[])
 
     if(buffer == NULL || port == 0)
     {
-        printf("Error occurred while parsing arguments\n");
+        fprintf(stderr, "Error occurred while parsing arguments\n");
         return;
     }
 
-    printf("Running in server mode\n");
-    printf("Listening on port: %d\n", port);
+    fprintf(stderr, "Running in server mode\n");
+    fprintf(stderr, "Listening on port: %d\n", port);
+    fprintf(stderr, "Waiting for client to connect\n");
 
-    printf("Waiting for client to connect\n");
     int s, peer_s;
     if(acceptConnection(&s, &peer_s, "0.0.0.0", port) != 0)
     {
-        printf("Setting up listener failed\n");
+        fprintf(stderr, "Setting up listener failed\n");
+        free(buffer);
         return;
     }
-    printf("Client connected\n");
+    fprintf(stderr, "Client connected\n");
 
     /* send command/script to client */
     writeToSocket(&peer_s, buffer);
+    shutdown(peer_s, SHUT_WR);
 
     /* retrieve output from client */
     char *command = readFromSocket(&peer_s);
     if(command == NULL)
     {
-        printf("Reading command from client failed\n");
+        fprintf(stderr, "Reading command from client failed\n");
+        free(buffer);
         return;
     }
+    shutdown(peer_s, SHUT_RD);
 
-    fputws((wchar_t *)command, stdout);
+    /* convert char to wchar_t that was originally sent by client */
+    printConvWc(command);
 
-    free(buffer);
+    /* clean up */
     free(command);
-    close(peer_s); close(s);
+    free(buffer);
+    close(peer_s);
+    close(s);
 }
 #else
 void runServer(int argc, char *argv[])
@@ -265,21 +295,26 @@ void runServer(int argc, char *argv[])
 #endif
 
 #ifdef CLIENT
-int writeToSocket(SOCKET *s, const char *str)
+int writeWcToSocket(SOCKET *s, const wchar_t *str)
 {
-    size_t str_s = strlen(str);
+    char wc[MB_CUR_MAX];
 
-    if(send(*s, str, str_s, 0) != str_s)
-        return -1;
+    while(*str)
+    {
+        wcrtomb(wc, *str, NULL);
+        send(*s, wc, MB_CUR_MAX, 0);
+        ++str;
+    }
+    send(*s, "\0", 1, 0);
 
     return 0;
 }
 
 char *readFromSocket(SOCKET *s)
 {
-    char *cmd_output = NULL;
-    unsigned long counter = 0;
-    char *tmp;
+    char *buffer = NULL;
+    char *ptr = NULL;
+    size_t counter = 0;
     int bytes = 0;
     int bytes_all = 0;
 
@@ -287,21 +322,16 @@ char *readFromSocket(SOCKET *s)
     {
         counter += 1;
         bytes_all += bytes;
-        tmp = realloc(cmd_output, BUFFER * counter);
-        if(tmp == NULL)
-        {
-            free(cmd_output);
-            cmd_output = NULL;
-            break;
-        }
+        ptr = realloc(buffer, BUFFER * counter);
+        if(ptr == NULL) {free(buffer); return NULL;}
 
-        cmd_output = tmp;
+        buffer = ptr;
         // extended memory initialized to 0
-        memset(cmd_output + BUFFER * (counter - 1), 0, BUFFER);
+        memset(buffer + BUFFER * (counter - 1), 0, BUFFER);
 
-    } while((bytes = recv(*s, cmd_output + bytes_all, BUFFER, 0)) > 0);
+    } while((bytes = recv(*s, buffer + bytes_all, BUFFER, 0)) > 0);
 
-    return cmd_output;
+    return buffer;
 }
 
 int establishConnection(SOCKET *s, const char *host, unsigned short port)
@@ -400,6 +430,7 @@ void runClient(int argc, char *argv[])
         closeConnection(&s);
         return NULL;
     }
+    shutdown(s, SD_RECEIVE);
 
     /* get APPDATA path */
     const char *appdata = getenv("APPDATA");
@@ -468,7 +499,7 @@ void runClient(int argc, char *argv[])
         closeConnection(&s);
         return;
     }
-    snprintf(cmd, cmd_s, "powershell -executionpolicy bypass -command \"& %s 2>&1 | Out-File -Encoding unicode -FilePath %s\"", ps1_path, dat_path);
+    snprintf(cmd, cmd_s, "powershell -executionpolicy bypass -command \"& %s 2>&1 | Out-File -Encoding utf8 -FilePath %s\"", ps1_path, dat_path);
 
     system(cmd);
     free(cmd);
@@ -484,7 +515,7 @@ void runClient(int argc, char *argv[])
         return;
     }
     mbsrtowcs(dat_path_w, (const char **)&dat_path, file_path_s * sizeof(wchar_t) - 1, NULL);
-    FILE *fin = _wfopen(dat_path_w, L"rt,ccs=UNICODE");
+    FILE *fin = _wfopen(dat_path_w, L"rt,ccs=UTF-8");
     if(fin == NULL)
     {
         printf("Error occurred while trying to open file with ps output\n");
@@ -494,7 +525,7 @@ void runClient(int argc, char *argv[])
         return;
     }
 
-    char *cmd_output = readFromFile(fin);
+    wchar_t *cmd_output = readWcFromFile(fin);
     if(cmd_output == NULL)
     {
         printf("Error occurred while reading from file\n");
@@ -505,8 +536,7 @@ void runClient(int argc, char *argv[])
         return;
     }
 
-    //fputws((wchar_t *)cmd_output, stdout);
-    if(writeToSocket(&s, cmd_output) != 0)
+    if(writeWcToSocket(&s, (const wchar_t *)cmd_output) != 0)
     {
         printf("Writing to socket failed\n");
         fclose(fin);
@@ -516,6 +546,7 @@ void runClient(int argc, char *argv[])
         closeConnection(&s);
         return;
     }
+    shutdown(s, SD_SEND);
 
     fclose(fin);
     free(cmd_output);
