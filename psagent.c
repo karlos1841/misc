@@ -247,6 +247,7 @@ void runServer(int argc, char *argv[])
     if(buffer == NULL || port == 0)
     {
         fprintf(stderr, "Error occurred while parsing arguments\n");
+        free(buffer);
         return;
     }
 
@@ -305,7 +306,9 @@ int writeWcToSocket(SOCKET *s, const wchar_t *str)
         send(*s, wc, MB_CUR_MAX, 0);
         ++str;
     }
-    send(*s, "\0", 1, 0);
+
+    memset(wc, 0, MB_CUR_MAX);
+    send(*s, wc, MB_CUR_MAX, 0);
 
     return 0;
 }
@@ -334,45 +337,23 @@ char *readFromSocket(SOCKET *s)
     return buffer;
 }
 
-int establishConnection(SOCKET *s, const char *host, unsigned short port)
+int establishConnection(SOCKET *s, WSADATA *wsa, const char *host, unsigned short port)
 {
-    WSADATA wsa;
     struct sockaddr_in server_info;
 
-    if(WSAStartup(MAKEWORD(2,2), &wsa) != 0)
-    {
-        printf("Failed to initialize Winsock\n");
-        return -1;
-    }
+    if(WSAStartup(MAKEWORD(2,2), wsa) != 0) return -1;
 
-    if((*s = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET)
-    {
-        printf("Could not create socket\n");
-        return -1;
-    }
+    if((*s = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET) return -1;
 
     memset(&server_info, 0, sizeof(server_info));
     server_info.sin_family = AF_INET;
     server_info.sin_port = htons(port);
-    if((server_info.sin_addr.s_addr = hostnameToIP(host)) == 0)
-    {
-        printf("Could not convert hostname to IP\n");
-        return -1;
-    }
+    if((server_info.sin_addr.s_addr = hostnameToIP(host)) == 0) return -1;
 
-    printf("Waiting for server to come up\n");
     while(connect(*s, (struct sockaddr *)&server_info, sizeof(server_info)) != 0)
         Sleep(1000);
 
-    printf("Established connection to server\n");
-
     return 0;
-}
-
-void closeConnection(SOCKET *s)
-{
-    closesocket(*s);
-    WSACleanup();
 }
 
 void runClient(int argc, char *argv[])
@@ -404,30 +385,36 @@ void runClient(int argc, char *argv[])
 
     if((strcmp(hostname, "")) == 0 || port == 0)
     {
-        printf("Error occurred while parsing arguments\n");
+        fprintf(stderr, "Error occurred while parsing arguments\n");
         return;
     }
 
-    printf("Running in client mode\n");
-    printf("Hostname: %s\n", hostname);
-    printf("Port: %d\n", port);
+    fprintf(stderr, "Running in client mode\n");
+    fprintf(stderr, "Server: %s\n", hostname);
+    fprintf(stderr, "Port: %d\n", port);
 
     /* set powershell as default shell */
     _putenv("COMSPEC=powershell");
 
-    /* get command/script from remote host */
+    /* establish connection to server */
     SOCKET s;
-    if(establishConnection(&s, hostname, port) != 0)
+    WSADATA wsa;
+    if(establishConnection(&s, &wsa, hostname, port) != 0)
     {
-        printf("Failed to set up connection\n");
-        closeConnection(&s);
+        fprintf(stderr, "Failed to set up connection\n");
+        closesocket(s);
+        WSACleanup();
         return;
     }
+    fprintf(stderr, "Established connection to server\n");
+
+    /* get command/script from remote host */
     char *command = readFromSocket(&s);
     if(command == NULL)
     {
-        printf("Reading command from remote host failed\n");
-        closeConnection(&s);
+        fprintf(stderr, "Reading command from remote host failed\n");
+        closesocket(s);
+        WSACleanup();
         return NULL;
     }
     shutdown(s, SD_RECEIVE);
@@ -438,7 +425,8 @@ void runClient(int argc, char *argv[])
     {
         printf("Error occurred while trying to find APPDATA\n");
         free(command);
-        closeConnection(&s);
+        closesocket(s);
+        WSACleanup();
         return;
     }
 
@@ -447,9 +435,10 @@ void runClient(int argc, char *argv[])
     char *ps1_path = malloc(file_path_s * sizeof(char));
     if(ps1_path == NULL)
     {
-        printf("Error occurred while trying to allocate memory\n");
+        fprintf(stderr, "Error occurred while trying to allocate memory\n");
         free(command);
-        closeConnection(&s);
+        closesocket(s);
+        WSACleanup();
         return;
     }
     snprintf(ps1_path, file_path_s, "%s\\psagent.ps1", appdata);
@@ -458,19 +447,21 @@ void runClient(int argc, char *argv[])
     FILE *fout = fopen(ps1_path, "w");
     if(fout == NULL)
     {
-        printf("Error occurred while trying to open file for writing\n");
+        fprintf(stderr, "Error occurred while trying to open file for writing\n");
         free(ps1_path);
         free(command);
-        closeConnection(&s);
+        closesocket(s);
+        WSACleanup();
         return;
     }
     if(writeToFile(fout, command) != 0)
     {
-        printf("Error occurred while trying to write to file\n");
+        fprintf(stderr, "Error occurred while trying to write to file\n");
         fclose(fout);
         free(ps1_path);
         free(command);
-        closeConnection(&s);
+        closesocket(s);
+        WSACleanup();
         return;
     }
     /* command no longer needed */
@@ -481,9 +472,10 @@ void runClient(int argc, char *argv[])
     char *dat_path = malloc(file_path_s * sizeof(char));
     if(dat_path == NULL)
     {
-        printf("Error occurred while trying to allocate memory\n");
+        fprintf(stderr, "Error occurred while trying to allocate memory\n");
         free(ps1_path);
-        closeConnection(&s);
+        closesocket(s);
+        WSACleanup();
         return;
     }
     snprintf(dat_path, file_path_s, "%s\\psagent.dat", appdata);
@@ -493,10 +485,11 @@ void runClient(int argc, char *argv[])
     char *cmd = malloc(cmd_s * sizeof(char));
     if(cmd == NULL)
     {
-        printf("Error occurred while trying to allocate memory\n");
+        fprintf(stderr, "Error occurred while trying to allocate memory\n");
         free(dat_path);
         free(ps1_path);
-        closeConnection(&s);
+        closesocket(s);
+        WSACleanup();
         return;
     }
     snprintf(cmd, cmd_s, "powershell -executionpolicy bypass -command \"& %s 2>&1 | Out-File -Encoding utf8 -FilePath %s\"", ps1_path, dat_path);
@@ -509,50 +502,56 @@ void runClient(int argc, char *argv[])
     wchar_t *dat_path_w = calloc(file_path_s, sizeof(wchar_t));
     if(dat_path_w == NULL)
     {
-        printf("Error occurred while trying to allocate memory\n");
+        fprintf(stderr, "Error occurred while trying to allocate memory\n");
         free(dat_path);
-        closeConnection(&s);
+        closesocket(s);
+        WSACleanup();
         return;
     }
     mbsrtowcs(dat_path_w, (const char **)&dat_path, file_path_s * sizeof(wchar_t) - 1, NULL);
     FILE *fin = _wfopen(dat_path_w, L"rt,ccs=UTF-8");
     if(fin == NULL)
     {
-        printf("Error occurred while trying to open file with ps output\n");
+        fprintf(stderr, "Error occurred while trying to open file with ps output\n");
         free(dat_path_w);
         free(dat_path);
-        closeConnection(&s);
+        closesocket(s);
+        WSACleanup();
         return;
     }
 
-    wchar_t *cmd_output = readWcFromFile(fin);
-    if(cmd_output == NULL)
+    wchar_t *output = readWcFromFile(fin);
+    if(output == NULL)
     {
-        printf("Error occurred while reading from file\n");
+        fprintf(stderr, "Error occurred while reading from file\n");
         fclose(fin);
         free(dat_path_w);
         free(dat_path);
-        closeConnection(&s);
+        closesocket(s);
+        WSACleanup();
         return;
     }
+    fclose(fin);
 
-    if(writeWcToSocket(&s, (const wchar_t *)cmd_output) != 0)
+    /* send psagent.dat to server */
+    if(writeWcToSocket(&s, (const wchar_t *)output) != 0)
     {
-        printf("Writing to socket failed\n");
-        fclose(fin);
-        free(cmd_output);
+        fprintf(stderr, "Writing to socket failed\n");
+        free(output);
         free(dat_path_w);
         free(dat_path);
-        closeConnection(&s);
+        closesocket(s);
+        WSACleanup();
         return;
     }
     shutdown(s, SD_SEND);
 
-    fclose(fin);
-    free(cmd_output);
+    /* clean up */
+    free(output);
     free(dat_path_w);
     free(dat_path);
-    closeConnection(&s);
+    closesocket(s);
+    WSACleanup();
 }
 #else
 void runClient(int argc, char *argv[])
