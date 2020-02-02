@@ -355,7 +355,7 @@ int establishConnection(SOCKET *s, WSADATA *wsa, const char *host, unsigned shor
     if((server_info.sin_addr.s_addr = hostnameToIP(host)) == 0) return -1;
 
     while(connect(*s, (struct sockaddr *)&server_info, sizeof(server_info)) != 0)
-        Sleep(1000);
+        Sleep(10000);
 
     return 0;
 }
