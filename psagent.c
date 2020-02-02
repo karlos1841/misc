@@ -114,11 +114,7 @@ unsigned long hostnameToIP(const char *hostname)
 #ifdef SERVER
 void writeToSocket(int *s, const char *str)
 {
-    while(*str)
-    {
-        write(*s, str, sizeof(char));
-        ++str;
-    }
+    write(*s, str, strlen(str));
     write(*s, "\0", sizeof(char));
 }
 char *readFromSocket(int *s)
@@ -252,8 +248,7 @@ void runServer(int argc, char *argv[])
     }
 
     fprintf(stderr, "Running in server mode\n");
-    fprintf(stderr, "Listening on port: %d\n", port);
-    fprintf(stderr, "Waiting for client to connect\n");
+    fprintf(stderr, "Port: %d\n", port);
 
     int s, peer_s;
     if(acceptConnection(&s, &peer_s, "0.0.0.0", port) != 0)
@@ -298,17 +293,26 @@ void runServer(int argc, char *argv[])
 #ifdef CLIENT
 int writeWcToSocket(SOCKET *s, const wchar_t *str)
 {
-    char wc[MB_CUR_MAX];
+    /* Build buffer to send over network
+    cause on Windows 1 byte segments are sent
+    despite enabled Nagle's algorithm
+    */
+    char buffer[BUFFER] = {0};
+    size_t len = 0;
 
     while(*str)
     {
-        wcrtomb(wc, *str, NULL);
-        send(*s, wc, MB_CUR_MAX, 0);
+        if(len >= BUFFER - MB_CUR_MAX)
+        {
+            send(*s, buffer, strlen(buffer), 0);
+            memset(buffer, 0, BUFFER);
+            len = 0;
+        }
+
+        len += wcrtomb(buffer + len, *str, NULL);
         ++str;
     }
-
-    memset(wc, 0, MB_CUR_MAX);
-    send(*s, wc, MB_CUR_MAX, 0);
+    send(*s, buffer, strlen(buffer) + MB_CUR_MAX, 0);
 
     return 0;
 }
