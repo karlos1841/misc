@@ -459,6 +459,7 @@ void runClient(int argc, char *argv[], int keep, int delay)
     char *command = readFromSocket(&s);
     if(command == NULL || strcmp(command, "") == 0) // command is empty if e.g. server sent null byte to close the connection
     {
+        free(command);
         closesocket(s);
         WSACleanup();
         goto NEW_CONNECTION;
