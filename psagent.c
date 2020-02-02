@@ -254,6 +254,15 @@ void runServer(int argc, char *argv[], int keep, int delay)
     fprintf(stderr, "Running in server mode\n");
     fprintf(stderr, "Port: %d\n", port);
 
+    int s, peer_s;
+    if(acceptConnection(&s, &peer_s, "0.0.0.0", port) != 0)
+    {
+        fprintf(stderr, "Setting up listener failed\n");
+        free(buffer);
+        return;
+    }
+    fprintf(stderr, "Client connected\n");
+
     /* block signals */
     sigset_t sig;
     sigemptyset(&sig);
@@ -263,15 +272,6 @@ void runServer(int argc, char *argv[], int keep, int delay)
     if(sigprocmask(SIG_BLOCK, &sig, NULL) == -1) return;
 
     sigset_t sig_p;
-
-    int s, peer_s;
-    if(acceptConnection(&s, &peer_s, "0.0.0.0", port) != 0)
-    {
-        fprintf(stderr, "Setting up listener failed\n");
-        free(buffer);
-        return;
-    }
-    fprintf(stderr, "Client connected\n");
 
     do {
     /* break when signals caught */
@@ -613,7 +613,7 @@ void printHelp()
     printf("Usage for psagent version 1.0\n");
     printf("\t\t-m - operation mode (client/server)\n");
     printf("\t\t-k - keep connection open (recommended, reduces new connection overhead, spamming retransmission packets, etc.)\n");
-    printf("\t\t-d - delay (default 10, client sends SYN flag every -d seconds and if -k option specified then command/script is run every -d seconds)\n");
+    printf("\t\t-d - delay (default 10 seconds, client sends SYN flag every -d value unless -k option is specified, for server it means command/script is run every -d value)\n");
     printf("\nServer options\n");
     printf("\t\t-p - port to listen on for connections\n");
     printf("\t\t-c - ps command to run on remote host\n");
