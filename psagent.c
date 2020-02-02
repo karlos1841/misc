@@ -113,11 +113,13 @@ unsigned long hostnameToIP(const char *hostname)
 }
 
 #ifdef SERVER
-void writeToSocket(int *s, const char *str)
+int writeToSocket(int *s, const char *str)
 {
-    write(*s, str, strlen(str));
+    if(write(*s, str, strlen(str)) <= 0) return -1;
     /* send 1 byte segment after all data has been sent */
-    write(*s, "\0", 1);
+    if(write(*s, "\0", 1) != 1) return -1;
+
+    return 0;
 }
 char *readFromSocket(int *s)
 {
@@ -284,7 +286,11 @@ void runServer(int argc, char *argv[], int keep, int delay)
     }
 
     /* send command/script to client */
-    writeToSocket(&peer_s, buffer);
+    if(writeToSocket(&peer_s, buffer) == -1)
+    {
+        fprintf(stderr, "Sending command/script failed\n");
+        continue;
+    }
     //shutdown(peer_s, SHUT_WR);
 
     /* retrieve output from client */
@@ -292,7 +298,7 @@ void runServer(int argc, char *argv[], int keep, int delay)
     if(command == NULL)
     {
         fprintf(stderr, "Reading command from client failed\n");
-        break;
+        continue;
     }
     //shutdown(peer_s, SHUT_RD);
 
