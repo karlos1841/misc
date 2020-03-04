@@ -26,14 +26,19 @@ void DynArrDestroy(DynArr *d)
     free(d->DynESize);
 }
 
-size_t DynArrGetSize(DynArr *d)
+size_t DynArrGetAllSize(DynArr *d)
 {
     return strlen(d->DynPtr);
 }
 
+size_t DynArrGetESize(DynArr *d)
+{
+    return d->DynENumber;
+}
+
 void DynArrStrAdd(DynArr *d, const char *e)
 {
-    size_t DynArrSize = DynArrGetSize(d);
+    size_t DynArrSize = DynArrGetAllSize(d);
     size_t e_size = strlen(e);
 
     // update number of elements and size of each element

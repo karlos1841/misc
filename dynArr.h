@@ -23,7 +23,10 @@ uint8_t DynArrInit(DynArr *d, size_t capacity);
 void DynArrDestroy(DynArr *d);
 
 // get size
-size_t DynArrGetSize(DynArr *d);
+size_t DynArrGetAllSize(DynArr *d);
+
+// get number of elements
+size_t DynArrGetESize(DynArr *d);
 
 // add string to DynArr
 void DynArrStrAdd(DynArr *d, const char *e);
