@@ -1,109 +1,108 @@
-#include "dynArr.h"
+#include "custom/dynArr.h"
 
-void dynArrCharInit(DynArr *d, const char *e)
+uint8_t DynArrInit(DynArr *d, size_t capacity)
 {
-    d->NUMBER_OF_ELEMENTS = strlen(e);
-    d->ELEMENT_SIZE = sizeof(char);
-    d->ptr = calloc(d->NUMBER_OF_ELEMENTS + 1, d->ELEMENT_SIZE);
-    memcpy(d->ptr, e, (d->NUMBER_OF_ELEMENTS) * (d->ELEMENT_SIZE));
+    d->DynPtr = calloc(capacity + 1, sizeof(char));
+    if(d->DynPtr == NULL) return 1;
+
+    // set capacity
+    d->DynCapacity = (capacity + 1) * sizeof(char);
+
+    // set number of elements to 0
+    d->DynENumber = 0;
+
+    // set size of each element, for now it's NULL
+    d->DynESize = NULL;
+
+    return 0;
 }
 
-void dynArrIntInit(DynArr *d, int e)
+void DynArrDestroy(DynArr *d)
 {
-    d->NUMBER_OF_ELEMENTS = 1;
-    d->ELEMENT_SIZE = sizeof(int);
-    d->ptr = calloc(d->NUMBER_OF_ELEMENTS, d->ELEMENT_SIZE);
-    memcpy(d->ptr, &e, (d->NUMBER_OF_ELEMENTS) * (d->ELEMENT_SIZE));
+    // free array containing user data
+    free(d->DynPtr);
+
+    // free array containing size of each element
+    free(d->DynESize);
 }
 
-void dynArrCharAdd(DynArr *d, const char *e)
+size_t DynArrGetSize(DynArr *d)
 {
-    if(d->ELEMENT_SIZE != sizeof(char))
-        // dynArrCharInit was not called
-        return;
-
-    size_t num_of_elem = strlen(e);
-    char *ptr = calloc(d->NUMBER_OF_ELEMENTS + num_of_elem + 1, d->ELEMENT_SIZE);
-    memcpy(ptr, d->ptr, (d->NUMBER_OF_ELEMENTS) * (d->ELEMENT_SIZE));
-    memcpy(ptr + (d->NUMBER_OF_ELEMENTS) * (d->ELEMENT_SIZE), e, num_of_elem * (d->ELEMENT_SIZE));
-    free(d->ptr);
-
-    d->NUMBER_OF_ELEMENTS += num_of_elem;
-    d->ptr = ptr;
+    return strlen(d->DynPtr);
 }
 
-void dynArrStrAdd(DynArr *d, const char *e)
+void DynArrStrAdd(DynArr *d, const char *e)
 {
-    if(d->ELEMENT_SIZE != sizeof(char))
-        // dynArrCharInit was not called
-        return;
+    size_t DynArrSize = DynArrGetSize(d);
+    size_t e_size = strlen(e);
 
-    size_t num_of_elem = strlen(e);
-    char *ptr = calloc(d->NUMBER_OF_ELEMENTS + num_of_elem + 2, d->ELEMENT_SIZE); // '\0' placed at start + end
-    memcpy(ptr, d->ptr, (d->NUMBER_OF_ELEMENTS) * (d->ELEMENT_SIZE));
-    memcpy(ptr + 1 + (d->NUMBER_OF_ELEMENTS) * (d->ELEMENT_SIZE), e, num_of_elem * (d->ELEMENT_SIZE));
-    free(d->ptr);
+    // update number of elements and size of each element
+    size_t *DynETmp = realloc(d->DynESize, (d->DynENumber + 1) * sizeof(size_t));
+    if(DynETmp == NULL) return;
 
-    d->NUMBER_OF_ELEMENTS += num_of_elem + 1;
-    d->ptr = ptr;
-}
+    d->DynESize = DynETmp;
+    d->DynESize[d->DynENumber] = e_size;
+    d->DynENumber += 1;
 
-void dynArrIntAdd(DynArr *d, int e)
-{
-    if(d->ELEMENT_SIZE != sizeof(int))
-        // dynArrIntInit was not called
-        return;
 
-    char *ptr = calloc(d->NUMBER_OF_ELEMENTS + 1, d->ELEMENT_SIZE);
-    memcpy(ptr, d->ptr, (d->NUMBER_OF_ELEMENTS) * (d->ELEMENT_SIZE));
-    memcpy(ptr + (d->NUMBER_OF_ELEMENTS) * (d->ELEMENT_SIZE), &e, d->ELEMENT_SIZE);
-    free(d->ptr);
-
-    d->NUMBER_OF_ELEMENTS += 1;
-    d->ptr = ptr;
-}
-
-void *dynArrAt(const DynArr *d, size_t index)
-{
-    if(index < d->NUMBER_OF_ELEMENTS)
-        return d->ptr + index * d->ELEMENT_SIZE;
-
-    return NULL;
-}
-
-void *dynArrStrAt(const DynArr *d, size_t index)
-{
-    if(d->ELEMENT_SIZE != sizeof(char))
-        return NULL;
-
-    if(index == 0)
-        return d->ptr;
-
-    size_t num_of_str = 1;
-    for(size_t i = 0; i < (d->NUMBER_OF_ELEMENTS) * (d->ELEMENT_SIZE); i++)
+    // update DynArr content
+    if(DynArrSize + e_size < d->DynCapacity)
     {
-        if(*(d->ptr + i) == 0)
+        memcpy(d->DynPtr + DynArrSize, e, e_size);
+    }
+
+    // reallocation needed
+    else
+    {
+        char *DynTmp = calloc(DynArrSize + e_size + 1, sizeof(char));
+        if(DynTmp == NULL) return;
+        memcpy(DynTmp, d->DynPtr, DynArrSize);
+        memcpy(DynTmp + DynArrSize, e, e_size);
+
+        free(d->DynPtr);
+        d->DynPtr = DynTmp;
+
+        // update capacity
+        d->DynCapacity = (DynArrSize + e_size + 1) * sizeof(char);
+    }
+}
+
+char *DynArrStrAt(const DynArr *d, size_t index)
+{
+    if(index < d->DynENumber)
+    {
+        size_t total = 0;
+        for(size_t i = 0; i < index; i++)
         {
-            if(index == num_of_str)
-                return (d->ptr + i + 1);
-            ++num_of_str;
+            total += d->DynESize[i];
         }
+
+        char *element = calloc(d->DynESize[index] + 1, sizeof(char));
+        if(element == NULL) return NULL;
+
+        memcpy(element, d->DynPtr + total, d->DynESize[index]);
+        return element;
     }
 
     return NULL;
 }
 
-void dynArrClear(DynArr *d)
+void DynArrIntAdd(DynArr *d, int64_t e)
 {
-    // clear all bytes
-    for(size_t i = 0; i < (d->NUMBER_OF_ELEMENTS) * (d->ELEMENT_SIZE); i++)
-        *(d->ptr + i) = 0;
+    char int64_str[DynBuffer];
+    snprintf(int64_str, DynBuffer, "%ld", e);
+
+    DynArrStrAdd(d, int64_str);
 }
 
-void dynArrDestroy(DynArr *d)
+int64_t DynArrIntAt(const DynArr *d, size_t index)
 {
-    d->NUMBER_OF_ELEMENTS = 0;
-    d->ELEMENT_SIZE = 0;
-    free(d->ptr);
-    d->ptr = NULL;
+    char *int64_str = DynArrStrAt(d, index);
+    if(int64_str == NULL) return 0;
+
+    int64_t value;
+    if((value = strtol(int64_str, NULL, 0)) == 0) return 0;
+
+    free(int64_str);
+    return value;
 }
