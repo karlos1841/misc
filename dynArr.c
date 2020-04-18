@@ -106,11 +106,7 @@ int64_t DynArrIntAt(const DynArr *d, size_t index)
     if(int64_str == NULL) return 0;
 
     int64_t value;
-    if((value = strtol(int64_str, NULL, 0)) == 0)
-    {
-        free(int64_str);
-        return 0;
-    }
+    value = strtol(int64_str, NULL, 0);
 
     free(int64_str);
     return value;
