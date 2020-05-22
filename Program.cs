@@ -16,6 +16,7 @@ using edu.stanford.nlp.sequences;
 using edu.stanford.nlp.ie.crf;
 using OpenNLP.Tools.Tokenize;
 using System.Xml;
+using System.Collections;
 
 namespace post
 {
@@ -27,16 +28,6 @@ namespace post
         [STAThread]
         static void Main()
         {
-            //Console.WriteLine(Fuzz.TokenSetRatio("beagh more", "beaghmore, carrigallen", PreprocessMode.Full));
-            //Console.WriteLine(Fuzz.TokenSetRatio("carrigallen", "beaghmore, carrigallen"));
-            //System.Environment.Exit(0);
-            //Relative paths to project files
-
-            //string user_search = "3 Kingston Terrace, Carrick.on.Shannon";
-            //string user_search = "No 21 Acres Avenue, Acres Cove, Drumshanbo";
-            //string user_search = "No.4 Cnoc Bofin, Dromod";
-            //Console.WriteLine(Fuzz.PartialRatio("LEITRIM", "CO. LEITRIM"));
-
             Paths paths = new Paths();
             // init locality database
             DataBase locality = new DataBase(paths.path.localitiesPath, "county_id", "locality_id", "name");
@@ -61,16 +52,38 @@ namespace post
                 Console.WriteLine("Creating model...");
                 train.createModelFromTrainingData(paths.path.trainPath, paths.path.modelPath, paths.path.properties);
             }
-
-            //Console.WriteLine(Fuzz.Ratio("16", "16 MILL RACE, MANORHAMILTON, CO. LEITRIM, F91P9R6"));
-            //Console.WriteLine(Fuzz.TokenSetRatio("", ""));
-            //return;
-            // use model
             /*
-            NERAddress address = new NERAddress();
-            train.useModel(paths.path.modelPath, "18 FINNAN APPTS, MARYMOUNT, CARRICK ON SHANNON", ref address);
+            var t = new F23.StringSimilarity.Damerau();
+            Console.WriteLine(t.Distance("", "12windmillpark"));
+            Console.WriteLine(Fuzz.PartialRatio("woodgreen", "wood"));
             return;
             */
+            // use model
+            /*
+            //string user_search_test = "6Woodlands Avenue, Dromahair";
+            string user_search_test = "";
+            string county_test = "leitrim";
+            NERAddress address_test = new NERAddress();
+            string[] user_search_test_normalized = address_test.normalize(user_search_test);
+
+            // print input address
+            Console.WriteLine("Input address: " + user_search_test);
+            // print normalized address
+            Console.WriteLine("Normalized address[tokens]: " + string.Join("|", user_search_test_normalized));
+            train.useModel(paths.path.modelPath, user_search_test.ToLower(), ref address_test);
+
+            FullAddress addr_test = new FullAddress(paths.path.fullAddressesPath, ref address_test);
+            List<FullAddressFields> best_addr_test = addr_test.getBestAddresses(county_test, user_search_test_normalized);
+            foreach (FullAddressFields best_addr_i in best_addr_test)
+            {
+                Console.WriteLine(best_addr_i.address, Console.ForegroundColor = ConsoleColor.Green);
+                Console.ResetColor();
+            }
+
+            return;
+            */
+            
+            
 
             foreach (string partial_file in Directory.EnumerateFiles(paths.path.partialAddresses, "*.csv"))
             {
@@ -109,13 +122,8 @@ namespace post
                     // docs indexed starting from id 1
                     obj.SendJsonToElastic(json);
 
-                    // query data
-                    /*
-                    string doc_id = "";
-                    string user_search = "Rantoge, Aghacashel";
-                    string top_match = obj.QueryElastic(user_search, ref doc_id);
-                    Console.WriteLine(top_match);
-                    */
+                    // print input address
+                    Console.WriteLine("Input address: " + user_search);
 
                     // set processing flag in elastic
                     obj.updateDocument(doc_id.ToString(), @"{""doc"": {""flag"": ""processing""}}");
@@ -127,34 +135,22 @@ namespace post
 
                     // init model
                     NERAddress address = new NERAddress();
+                    // normalize data
+                    string[] user_search_normalized = address.normalize(user_search);
+
                     // print what model found
-                    string model_found = train.useModel(paths.path.modelPath, user_search, ref address);
-                    Console.WriteLine("Model found: " + model_found);
+                    train.useModel(paths.path.modelPath, user_search.ToLower(), ref address);
 
-                    // init NLP
-                    NLP n = new NLP(user_search, county);
-                    // find county_id from user_search
-                    n.findCounty();
-
-                    // find locality_ids from localities for county_id (may contain false positives because some secondary locality names are the same as locality names)
-                    //n.findLocalities(ref locality);
-                    //Console.WriteLine("locality ids: " + String.Join(", ", n.locality_ids));
-
-                    // find secondary locality (optional, list may contain false positives)
-                    //n.findSecLocalities(ref secLocality);
-                    //Console.WriteLine("secondary locality ids: " + String.Join(", ", n.secLocality_ids));
-
-                    // find thorofare ids
-                    //n.findThorofare(ref thorofare);
-                    //Console.WriteLine("thorofare ids: " + String.Join(", ", n.thorofare_ids));
+                    // print normalized address
+                    Console.WriteLine("Normalized address[tokens]: " + string.Join("|", user_search_normalized));
 
                     // init FullAddress
-                    FullAddress addr = new FullAddress(paths.path.fullAddressesPath, ref n, ref address);
+                    FullAddress addr = new FullAddress(paths.path.fullAddressesPath, ref address);
                     // set flag to processed in elastic
                     obj.updateDocument(doc_id.ToString(), @"{""doc"": {""flag"": ""processed""}}");
 
                     // for maybe matches index nested objects
-                    List<FullAddressFields> best_addr = addr.getBestAddresses(user_search, model_found);
+                    List<FullAddressFields> best_addr = addr.getBestAddresses(county, user_search_normalized);
                     if (best_addr.Count == 0)
                     {
                         Console.WriteLine("No matches found");
@@ -317,7 +313,6 @@ namespace post
                     objResult.Add("message", lines[i]);
                     json.Add("{ \"index\" : { \"_index\" : \"" + indexname + "\", \"_id\": \"" + i + "\"} }");
                     json.Add(JsonConvert.SerializeObject(objResult));
-
                 }
                 Console.ForegroundColor = ConsoleColor.Green;
                 Console.WriteLine("OK");
@@ -345,8 +340,6 @@ namespace post
         {
             PostData body = PostData.MultiJson(json);
             var response = client.Bulk<BytesResponse>(indexname, body);
-            //Debug.WriteLine(response.DebugInformation);
-
 
             foreach (string json_line in json)
             {
@@ -508,7 +501,7 @@ namespace post
         public string department;
         public string organisation_name;
 
-        public int county;
+        public string county;
         public string address;
         public int building;
         public long address_reference;
@@ -517,7 +510,6 @@ namespace post
     class FullAddress
     {
         string addrPath;
-        NLP nlp;
         NERAddress ner;
         string locality = "locality";
         string secLocality = "secondary_locality";
@@ -529,20 +521,21 @@ namespace post
         string department = "department";
         string organisation_name = "organisation_name";
 
-        string county = "county_id";
+        string county = "county";
         string address = "address";
         string building = "building_id";
         string address_reference = "address_reference";
-        int MIN_SCORE;
+        double MIN_SCORE;
+        double MAX_DIST;
 
-        public FullAddress(string addrPath, ref NLP nlp, ref NERAddress ner)
+        public FullAddress(string addrPath, ref NERAddress ner)
         {
             this.addrPath = addrPath;
-            this.nlp = nlp;
             this.ner = ner;
-            this.MIN_SCORE = 80;
+            this.MIN_SCORE = 0.90;
+            this.MAX_DIST = 2;
         }
-        public List<FullAddressFields> getBestAddresses(string user_search, string model_found)
+        public List<FullAddressFields> getBestAddresses(string user_county, string[] user_search_normalized)
         {
             TextFieldParser parser = new TextFieldParser(addrPath);
             parser.TextFieldType = FieldType.Delimited;
@@ -552,7 +545,7 @@ namespace post
             string[] fields = parser.ReadFields();
             int fields_len = fields.Length;
 
-            int county_id_index = -1;
+            int county_index = -1;
             int locality_index = -1;
             int secLocality_index = -1;
             int thorofare_index = -1;
@@ -569,7 +562,7 @@ namespace post
             {
                 string value = fields.GetValueAt<string>(col_index);
                 if (string.Equals(county, value, StringComparison.OrdinalIgnoreCase))
-                    county_id_index = col_index;
+                    county_index = col_index;
 
                 else if (string.Equals(locality, value, StringComparison.OrdinalIgnoreCase))
                     locality_index = col_index;
@@ -611,6 +604,7 @@ namespace post
             }
 
             System.Collections.Generic.HashSet<FullAddressFields> top_addresses = new System.Collections.Generic.HashSet<FullAddressFields>();
+            List<int> address_scores = new List<int>();
             while (!parser.EndOfData)
             {
                 fields = parser.ReadFields();
@@ -621,7 +615,7 @@ namespace post
                 fulladdr.secondary_locality = fields.GetValueAt<string>(secLocality_index);
                 fulladdr.thorofare = fields.GetValueAt<string>(thorofare_index);
                 fulladdr.building_number = fields.GetValueAt<string>(building_number_index);
-                fulladdr.county = fields.GetValueAt<int>(county_id_index);
+                fulladdr.county = fields.GetValueAt<string>(county_index);
                 fulladdr.address = fields.GetValueAt<string>(address_index);
                 fulladdr.building = fields.GetValueAt<int>(building_id_index);
                 fulladdr.address_reference = fields.GetValueAt<long>(address_reference_index);
@@ -632,169 +626,65 @@ namespace post
                 fulladdr.department = fields.GetValueAt<string>(department_index);
                 fulladdr.organisation_name = fields.GetValueAt<string>(organisation_name_index);
 
-                if (nlp.county_id == fulladdr.county)
+                if (string.Equals(user_county, fulladdr.county, StringComparison.OrdinalIgnoreCase))
                 {
-                    // narrow down the matches by using what model found
-                    // get matches with > MIN_SCORE
                     string address_split = fulladdr.address.Replace(fulladdr.address.Split(",").Last(), "");
-                    if (Fuzz.PartialTokenSetRatio(model_found, address_split.ToLower(), PreprocessMode.Full) > MIN_SCORE)
-                    {
-                        // narrow it down by checking similarity for locality, secondary locality and thorofare
-                        if(!ner.locality.IsEmpty())
-                        {
-                            if (Fuzz.TokenSetRatio(ner.locality, fulladdr.locality.ToLower(), PreprocessMode.Full) < MIN_SCORE)
-                                continue;
-                        }
-                        if(!ner.secondary_locality.IsEmpty())
-                        {
-                            if (Fuzz.TokenSetRatio(ner.secondary_locality, fulladdr.secondary_locality.ToLower(), PreprocessMode.Full) < MIN_SCORE)
-                                continue;
-                        }
-                        if(!ner.thorofare.IsEmpty())
-                        {
-                            if (Fuzz.TokenSetRatio(ner.thorofare, fulladdr.thorofare.ToLower(), PreprocessMode.Full) < MIN_SCORE)
-                                continue;
-                        }
-                        // if building number is present but not equal then go to next record
-                        if(!ner.building_number.IsEmpty())
-                        {
-                            // not always building number is present in fulladdr.building_number
-                            if (!fulladdr.building_number.IsEmpty())
-                            {
-                                if (ner.building_number != fulladdr.building_number.ToLower())
-                                    continue;
-                            }
-                            else if (!fulladdr.sub_building_name.IsEmpty())
-                            {
-                                if (ner.building_number != fulladdr.sub_building_name.ToLower())
-                                    continue;
-                            }
-                            else if (!fulladdr.building_name.IsEmpty())
-                            {
-                                if (ner.building_number != fulladdr.building_name.ToLower())
-                                    continue;
-                            }
-                            else if (!fulladdr.building_group_name.IsEmpty())
-                            {
-                                if (ner.building_number != fulladdr.building_group_name.ToLower())
-                                    continue;
-                            }
-                            else
-                                continue;
-                        }
+                    string[] address_split_normalized = ner.normalize(address_split);
 
+                    if (!fulladdr.building_number.IsEmpty())
+                    {
+                        if (!ner.numbers.Contains<string>(fulladdr.building_number.ToLower().Trim()))
+                            continue;
+                    }
+                    if (!fulladdr.sub_building_name.IsEmpty())
+                    {
+                        string sub_building_number = Regex.Replace(fulladdr.sub_building_name, @"(apartment)|(unit)|(flat)", "", RegexOptions.IgnoreCase).ToLower().Trim();
+                        if (!ner.numbers.Contains<string>(sub_building_number))
+                            continue;
+                    }
+
+
+                    int tokens_match = 0;
+                    var sim = new F23.StringSimilarity.JaroWinkler();
+                    var dist = new F23.StringSimilarity.Damerau();
+                    foreach (string user_search_token in user_search_normalized)
+                    {
+                        foreach (string address_token in address_split_normalized)
+                        {
+                            //double score = sim.Similarity(user_search_token, address_token);
+                            double score = Fuzz.WeightedRatio(user_search_token, address_token, PreprocessMode.Full);
+                            double score2 = dist.Distance(user_search_token, address_token);
+                            if(score >= MIN_SCORE * 100 || score2 <= MAX_DIST)
+                            //if (score >= MIN_SCORE && score2 <= MAX_DIST)
+                            {
+                                tokens_match += 1;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (user_search_normalized.Length == tokens_match)
+                    {
                         top_addresses.Add(fulladdr);
                     }
+
+                    //break;
                 }
-                //break;
-            }
-            // return empty if no matches found
-            if (top_addresses.Count == 0)
-                return new List<FullAddressFields>();
-
-            // last processing, match user search against full address to get rid of similar wrong matches
-            Dictionary<int, List<FullAddressFields>> score_address = new Dictionary<int, List<FullAddressFields>>();
-            foreach (FullAddressFields fulladdr in top_addresses)
-            {
-                string address_split = fulladdr.address.Replace(fulladdr.address.Split(",").Last(), "");
-                Console.WriteLine(address_split);
-                int score = Fuzz.WeightedRatio(user_search, address_split.ToLower(), PreprocessMode.Full);
-                Console.WriteLine("Score: " + score);
-                if (!score_address.ContainsKey(score))
-                    score_address[score] = new List<FullAddressFields>();
-
-                //Console.WriteLine(addr);
-                //Console.WriteLine(score);
-                //Console.WriteLine(addr_parsed);
-                score_address[score].Add(fulladdr);
             }
 
-            int max_score = score_address.Keys.Max();
-            List<FullAddressFields> score_addresses;
-            score_address.TryGetValue(max_score, out score_addresses);
-            return score_addresses;
-        }
-    }
-
-    class NLP
-    {
-        public string partialAddress;
-        public string county;
-        public int county_id = -1;
-        public List<int> locality_ids = new List<int>();
-        public List<int> secLocality_ids = new List<int>();
-        public List<int> thorofare_ids = new List<int>();
-
-        public NLP(string user_search, string county)
-        {
-            partialAddress = user_search.ToLower();
-            this.county = county;
-            this.Tokenize();
-        }
-
-        public void findCounty()
-        {
-            foreach (KeyValuePair<int, string> entry in DataBase.counties)
+            List<FullAddressFields> best_addresses = new List<FullAddressFields>();
+            foreach(FullAddressFields addr in top_addresses)
             {
-                if (string.Equals(county, entry.Value, StringComparison.OrdinalIgnoreCase))
+                if(!addr.building_number.IsEmpty() || !addr.sub_building_name.IsEmpty())
                 {
-                    county_id = entry.Key;
-                    return;
-                }
-            }
-        }
-
-        private List<int> fuzzyFind(ref DataBase d)
-        {
-            List<KeyValuePair<int, int>> locality_id_score = new List<KeyValuePair<int, int>>();
-
-            foreach (KeyValuePair<int, List<KeyValuePair<int, string>>> entry in d.data)
-            {
-                if (entry.Key == county_id)
-                {
-                    foreach (KeyValuePair<int, string> loc in entry.Value)
-                    {
-                        // fuzzy matching based on tokenizing without ordering using full process
-                        locality_id_score.Add(new KeyValuePair<int, int>(loc.Key, Fuzz.TokenSetRatio(Regex.Replace(loc.Value, @"\s+", String.Empty), Regex.Replace(partialAddress, @"\s+", String.Empty), PreprocessMode.Full)));
-                    }
-                }
-            }
-            if (locality_id_score.Count == 0)
-                return new List<int>();
-
-            List<int> top_locality_ids = new List<int>();
-            int max_score = locality_id_score.Max(x => x.Value);
-
-            // find ids with best score
-            foreach (KeyValuePair<int, int> entry in locality_id_score)
-            {
-                if (entry.Value == max_score)
-                {
-                    top_locality_ids.Add(entry.Key);
+                    best_addresses.Add(addr);
                 }
             }
 
-            return top_locality_ids;
-        }
+            if (best_addresses.Count == 0)
+                return top_addresses.ToList<FullAddressFields>();
 
-        public void findLocalities(ref DataBase d)
-        {
-            locality_ids = fuzzyFind(ref d);
-        }
-
-        public void findSecLocalities(ref DataBase d)
-        {
-            // secondary locality is optional so the list may contain false positives
-            secLocality_ids = fuzzyFind(ref d);
-        }
-        public void findThorofare(ref DataBase d)
-        {
-            thorofare_ids = fuzzyFind(ref d);
-        }
-        private void Tokenize()
-        {
-            //var t = new EnglishMaximumEntropyTokenizer(modelPath);
-            //var t = new EnglishRuleBasedTokenizer(false);
+            return best_addresses;
         }
     }
 
@@ -810,6 +700,8 @@ namespace post
         public string department;
         public string organisation_name;
 
+        public string[] numbers;
+
         public NERAddress()
         {
             this.locality = "";
@@ -822,12 +714,58 @@ namespace post
             this.department = "";
             this.organisation_name = "";
         }
+
+        public string[] normalize(string user_search)
+        {
+            // user_search
+            user_search = user_search.ToLower();
+
+            // try to normalize address, removing words and trimming in the first part
+            string[] keywords = { "(no\\.)", "(no:)", "(no )" };
+            string first_part = user_search.Split(",")[0];
+            var first_match = Regex.Matches(first_part, string.Join("|", keywords), RegexOptions.IgnoreCase);
+            if (first_match.Count > 0)
+            {
+                foreach (var keyword_match in first_match)
+                {
+                    var regex = new Regex(keyword_match.ToString());
+                    string first_part_replace = regex.Replace(first_part, "", 1);
+                    user_search = user_search.Replace(first_part, first_part_replace);
+                    first_part = first_part_replace;
+                }
+            }
+            user_search = user_search.Trim();
+
+            // replace words in whole search
+            Dictionary<string, string> replace_keywords = new Dictionary<string, string>();
+            replace_keywords.Add("apt ", "apartment ");
+            replace_keywords.Add("apt.", "apartment ");
+            replace_keywords.Add("saint", "st");
+            replace_keywords.Add("co.", "");
+
+            foreach (KeyValuePair<string, string> replace_keyword in replace_keywords)
+            {
+                if (Regex.IsMatch(user_search, replace_keyword.Key, RegexOptions.IgnoreCase))
+                {
+                    user_search = user_search.Replace(replace_keyword.Key, replace_keyword.Value);
+                }
+            }
+
+            // tokenize
+            var user_search_tokenized = user_search.Split(new string[] { "," }, StringSplitOptions.RemoveEmptyEntries);
+            user_search_tokenized = string.Join("", user_search_tokenized).Split(new string[] { " " }, StringSplitOptions.RemoveEmptyEntries);
+            // remove spaces, dots, etc.
+            for(int i = 0; i < user_search_tokenized.Length; i++)
+            {
+                user_search_tokenized[i] = user_search_tokenized[i].Replace(".", "").Replace("-", "").Replace("'", "").Replace("\"", "").Replace(":", "");
+            }
+
+            return user_search_tokenized;
+        }
     }
 
     class NERTrain
     {
-        int score_similarity;
-        Dictionary<string, string> data_to_train;
         DataBase db_locality;
         DataBase db_secondary_locality;
         DataBase db_thorofare;
@@ -903,141 +841,90 @@ namespace post
                 fields = parser.ReadFields();
 
                 // get value in columns
-                //int county_value = fields.GetValueAt<int>(county_id);
-                //int locality_value = fields.GetValueAt<int>(locality_id);
-                //int secondary_locality_value = fields.GetValueAt<int>(secondary_locality_id);
-                //int thorofare_value = fields.GetValueAt<int>(thorofare_id);
+                string[] values = {
+                    fields.GetValueAt<string>(county).ToLower(),
+                    fields.GetValueAt<string>(locality).ToLower(),
+                    fields.GetValueAt<string>(secondary_locality).ToLower(),
+                    fields.GetValueAt<string>(thorofare).ToLower(),
+                    fields.GetValueAt<string>(building_group_name).ToLower(),
+                    fields.GetValueAt<string>(building_name).ToLower(),
+                    fields.GetValueAt<string>(sub_building_name).ToLower(),
+                    fields.GetValueAt<string>(building_number).ToLower(),
+                    fields.GetValueAt<string>(department).ToLower(),
+                    fields.GetValueAt<string>(organisation_name).ToLower()
+            };
 
-                // find county
-                //string county_str = findCounty(county_value);
-
-                // find locality
-                //string locality_str = findLocality(county_value, locality_value);
-
-                // find secondary locality
-                //string secondary_locality_str = findSecondaryLocality(county_value, secondary_locality_value);
-
-                // find thorfare
-                //string thorofare_str = findThorofare(county_value, thorofare_value);
-
-                // get value in columns
-                string county_value = fields.GetValueAt<string>(county).ToLower();
-                string locality_value = fields.GetValueAt<string>(locality).ToLower();
-                string secondary_locality_value = fields.GetValueAt<string>(secondary_locality).ToLower();
-                string thorofare_value = fields.GetValueAt<string>(thorofare).ToLower();
-
-                string building_group_name_value = fields.GetValueAt<string>(building_group_name).ToLower();
-                string building_name_value = fields.GetValueAt<string>(building_name).ToLower();
-                string sub_building_name_value = fields.GetValueAt<string>(sub_building_name).ToLower();
-
-                string building_number_value = fields.GetValueAt<string>(building_number).ToLower();
-
-                string department_value = fields.GetValueAt<string>(department).ToLower();
-                string organisation_name_value = fields.GetValueAt<string>(organisation_name).ToLower();
-
-                // make address lowercase
-                string address_str = fields.GetValueAt<string>(address).ToLower();
-
-                // tokenize address
+                // tokenize column values and assign IOB tags
+                Dictionary<string, string[]> tokens = new Dictionary<string, string[]>();
                 var tokenizer = new EnglishRuleBasedTokenizer(false);
-                string[] tokenized_address = tokenizer.Tokenize(address_str);
 
-                List<KeyValuePair<string, string>> token_tag_list = new List<KeyValuePair<string, string>>();
+                string[] tokenized_organisation_name = tokenizer.Tokenize(values[9]);
+                tokens["ORGANISATION_NAME"] = tokenized_organisation_name;
 
+                string[] tokenized_department = tokenizer.Tokenize(values[8]);
+                tokens["DEPARTMENT"] = tokenized_department;
 
-                for(int index = 0; index < tokenized_address.Length; index++)
+                string[] tokenized_building_number = tokenizer.Tokenize(values[7]);
+                tokens["BUILDING_NUMBER"] = tokenized_building_number;
+
+                string[] tokenized_sub_building_name = tokenizer.Tokenize(values[6]);
+                tokens["SUB_BUILDING_NAME"] = tokenized_sub_building_name;
+
+                string[] tokenized_building_name = tokenizer.Tokenize(values[5]);
+                tokens["BUILDING_NAME"] = tokenized_building_name;
+
+                string[] tokenized_building_group_name = tokenizer.Tokenize(values[4]);
+                tokens["BUILDING_GROUP_NAME"] = tokenized_building_group_name;
+
+                string[] tokenized_thorofare = tokenizer.Tokenize(values[3]);
+                tokens["THOROFARE"] = tokenized_thorofare;
+
+                string[] tokenized_secondary_locality = tokenizer.Tokenize(values[2]);
+                tokens["SECONDARY_LOCALITY"] = tokenized_secondary_locality;
+
+                string[] tokenized_locality = tokenizer.Tokenize(values[1]);
+                tokens["LOCALITY"] = tokenized_locality;
+
+                string[] tokenized_county = tokenizer.Tokenize(values[0]);
+                tokens["COUNTY"] = tokenized_county;
+
+                // generate variations of data for training
+                // EDIT: tag only numbers for training
+                //Dictionary<string[], string[]> tagged_tokens = addIOB(ref tokens);
+
+                // manually crafted data to teach about building numbers/apartments/units, etc.
+                string[] training_data = {
+                    "no.\t0\n4\tNUMBER\ncnoc\t0\nbofin\t0\n,\t0\ndromod\t0\n",
+                    "10\tNUMBER\ncroi\t0\nna\t0\ncarraige\t0\n,\t0\nkeshcarrigan\t0\n",
+                    "high\t0\nstreet\t0\n,\t0\nballinamore\t0\n",
+                    "no\t0\n4\tNUMBER\ncluain\t0\nard\t0\n,\t0\ncarrick-on-shannon\t0\n",
+                    "no\t0\n1\tNUMBER\n.\t0\nst\t0\n.\t0\nciallian\t0\n's\t0\nview\t0\n,\t0\nfenagh\t0\n",
+                    "no.\t0\n12\tNUMBER\n,\t0\nwindmill\t0\npark\t0\n,\t0\ndrumkeerin\t0\n",
+                    "24\tNUMBER\nhillcrest\t0\n,\t0\nstonebridge\t0\n,\t0\ndromahaire\t0\n",
+                    "apartment\t0\nno.\t0\n11\tNUMBER\nallen\t0\napartments\t0\n,\t0\nshannon\t0\ncourt\t0\n,\t0\ncarrick-on-shannon\t0\n",
+                    "apt\t0\n17\tNUMBER\nthe\t0\nplaza\t0\n,\t0\ncentral\t0\npark\t0\n,\t0\ncarrick-on-shannon\t0\n",
+                    "apartment\t0\nno\t0\n6\tNUMBER\nsummerhaven\t0\n,\t0\nsummerhill\t0\n,\t0\ncarrick-on-shannon\t0\n",
+                    "unit\t0\n11\tNUMBER\n,\t0\nbridge\t0\nlane\t0\n,\t0\ncarrick\t0\non\t0\nshannon\t0\n",
+                    "apartment\t0\n6\tNUMBER\nboderg\t0\n,\t0\nshannon\t0\ncourt\t0\n,\t0\ncarrick-on-shannon\t0\n",
+                    "40a\tNUMBER\ninver\t0\ngael\t0\n,\t0\ncortober\t0\n,\t0\ncarrick\t0\non\t0\nshannon\t0\n",
+                    "no:\t0\n73\tNUMBER\nmelvin\t0\nfields\t0\n,\t0\nkinlough\t0\n,\t0\nco.\t0\nleitrim\t0\n",
+                    "32b\tNUMBER\nhillcrest\t0\ngrove\t0\n,\t0\ndrumshambo\t0\n",
+                    "15\tNUMBER\n29\tNUMBER\n32\tNUMBER\n33\tNUMBER\n34\tNUMBER\n35\tNUMBER\n38\tNUMBER\n53\tNUMBER\n54\tNUMBER\n57\tNUMBER\n,\t0\nliscara\t0\n,\t0\ncarrick-on-shannon\t0\n",
+                    "28\tNUMBER\n&\t0\n31\tNUMBER\nthe\t0\nstables\t0\n,\t0\nduncarbry\t0\n,\t0\ntullaghan\t0\n",
+                    "jamestown\t0\napt\t0\n1\tNUMBER\n2\tNUMBER\nand\t0\n3\tNUMBER\n,\t0\njamestown\t0\n,\t0\nco\t0\nleitrim\t0\n",
+                    "25a\tNUMBER\nmac\t0\nragnaill\t0\ncourt\t0\n,\t0\nlouth\t0\nrynn\t0\n,\t0\nmohill\t0\n",
+                    "20\tNUMBER\n22\tNUMBER\n7\tNUMBER\n25\tNUMBER\nriverside\t0\n,\t0\nballinamore\t0\n,\t0\nco.\t0\nleitrim\t0\n",
+                    "apt.\t0\n56\tNUMBER\n-\t0\nshannon\t0\nquays\t0\n,\t0\naghnahunshin\t0\n,\t0\nrooskey\t0\n",
+                    "houses\t0\n1\tNUMBER\n2\tNUMBER\n3\tNUMBER\nlisnagot\t0\n,\t0\n4\tNUMBER\n5\tNUMBER\n9\tNUMBER\n10\tNUMBER\ntown\t0\nhouses\t0\nshannon\t0\ngrove\t0\n,\t0\n35a\tNUMBER\n35b\tNUMBER\n40\tNUMBER\n41\tNUMBER\nshannon\t0\ngrove\t0\n",
+                    "5\tNUMBER\nwoodgreen\t0\n,\t0\ndromahair\t0\n"
+                };
+
+                foreach(string data in training_data)
                 {
-                    bool found = false;
-
-                    int index2 = index;
-                    Dictionary<string, List<int>> chunk_scores = new Dictionary<string, List<int>>();
-                    while(index2 < tokenized_address.Length && tokenized_address[index2] != ",")
-                    {
-                        if (!chunk_scores.ContainsKey("COUNTY"))
-                            chunk_scores["COUNTY"] = new List<int>();
-
-                        if (!chunk_scores.ContainsKey("LOCALITY"))
-                            chunk_scores["LOCALITY"] = new List<int>();
-
-                        if (!chunk_scores.ContainsKey("SECONDARY_LOCALITY"))
-                            chunk_scores["SECONDARY_LOCALITY"] = new List<int>();
-
-                        if (!chunk_scores.ContainsKey("THOROFARE"))
-                            chunk_scores["THOROFARE"] = new List<int>();
-
-                        if (!chunk_scores.ContainsKey("BUILDING_GROUP_NAME"))
-                            chunk_scores["BUILDING_GROUP_NAME"] = new List<int>();
-
-                        if (!chunk_scores.ContainsKey("BUILDING_NAME"))
-                            chunk_scores["BUILDING_NAME"] = new List<int>();
-
-                        if (!chunk_scores.ContainsKey("SUB_BUILDING_NAME"))
-                            chunk_scores["SUB_BUILDING_NAME"] = new List<int>();
-
-                        if (!chunk_scores.ContainsKey("BUILDING_NUMBER"))
-                            chunk_scores["BUILDING_NUMBER"] = new List<int>();
-
-                        if (!chunk_scores.ContainsKey("DEPARTMENT"))
-                            chunk_scores["DEPARTMENT"] = new List<int>();
-
-                        if (!chunk_scores.ContainsKey("ORGANISATION_NAME"))
-                            chunk_scores["ORGANISATION_NAME"] = new List<int>();
-
-
-                            chunk_scores["COUNTY"].Add(Fuzz.TokenSetRatio(tokenized_address[index2], county_value));
-                            chunk_scores["LOCALITY"].Add(Fuzz.TokenSetRatio(tokenized_address[index2], locality_value));
-                            chunk_scores["SECONDARY_LOCALITY"].Add(Fuzz.TokenSetRatio(tokenized_address[index2], secondary_locality_value));
-                            chunk_scores["THOROFARE"].Add(Fuzz.TokenSetRatio(tokenized_address[index2], thorofare_value));
-                            chunk_scores["BUILDING_GROUP_NAME"].Add(Fuzz.TokenSetRatio(tokenized_address[index2], building_group_name_value));
-                            chunk_scores["BUILDING_NAME"].Add(Fuzz.TokenSetRatio(tokenized_address[index2], building_name_value));
-                            chunk_scores["SUB_BUILDING_NAME"].Add(Fuzz.TokenSetRatio(tokenized_address[index2], sub_building_name_value));
-                            chunk_scores["BUILDING_NUMBER"].Add(Fuzz.TokenSetRatio(tokenized_address[index2], building_number_value));
-                            chunk_scores["DEPARTMENT"].Add(Fuzz.TokenSetRatio(tokenized_address[index2], department_value));
-                            chunk_scores["ORGANISATION_NAME"].Add(Fuzz.TokenSetRatio(tokenized_address[index2], organisation_name_value));
-
-                            index2 += 1;
-                        }
-
-                        foreach (KeyValuePair<string, List<int>> chunk_score in chunk_scores)
-                        {
-                            // check if chunk upto "," belongs to one entity
-                            if (chunk_score.Value.Min() == 100)
-                            {
-                            if (!token_tag_list.Contains(new KeyValuePair<string, string>(tokenized_address[index], chunk_score.Key)))
-                            {
-                                token_tag_list.Add(new KeyValuePair<string, string>(tokenized_address[index], chunk_score.Key));
-                                found = true;
-                                break;
-                            }
-                            }
-                            // building numbers are part of another entity
-                            else if(chunk_score.Key == "BUILDING_NUMBER" && chunk_score.Value.Max() == 100)
-                            {
-                                token_tag_list.Add(new KeyValuePair<string, string>(building_number_value, chunk_score.Key));
-                                found = true;
-                            }
-                        }
-
-                    // if not found then assign 0
-                    if (!found)
-                    {
-                        token_tag_list.Add(new KeyValuePair<string, string>(tokenized_address[index], "0"));
-                    }
+                    f.WriteLine(data);
                 }
 
-                foreach (KeyValuePair<string, string> token_tag in token_tag_list)
-                {
-                    //Console.Write(token_tag.Key);
-                    //Console.Write("\t");
-                    //Console.WriteLine(token_tag.Value);
-
-                    // write to file
-                    f.Write(token_tag.Key);
-                    f.Write("\t");
-                    f.WriteLine(token_tag.Value);
-                }
-                f.WriteLine();
-                //break;
+                break;
             }
 
             f.Close();
@@ -1058,11 +945,8 @@ namespace post
             crf.serializeClassifier(outputPath);
         }
 
-        public string useModel(string inputPath, string partial_address, ref NERAddress addr)
+        public void useModel(string inputPath, string partial_address, ref NERAddress addr)
         {
-            // training data uses lowercase
-            partial_address = partial_address.ToLower();
-
             CRFClassifier model = CRFClassifier.getClassifierNoExceptions(inputPath);
 
             //string tagged_address = model.classifyToString(partial_address);
@@ -1072,43 +956,53 @@ namespace post
 
             // parse xml
             XmlDocument doc = new XmlDocument();
-            doc.LoadXml("<root>" + tagged_address + "</root>");
+            try
+            {
+                doc.LoadXml("<root>" + tagged_address + "</root>");
+            }
+            catch(XmlException e)
+            {
+                Console.WriteLine("Exception occurred while parsing xml: " + e.Message);
+                return;
+            }
 
             Console.WriteLine("Model output: " + tagged_address);
 
+            string numbers = "";
             foreach (XmlNode node in doc.DocumentElement.ChildNodes)
             {
-                if (node.Name ==  "LOCALITY")
+                if (Regex.IsMatch(node.Name, "^[IOB]-LOCALITY"))
                     addr.locality += node.InnerText + " ";
 
-                if (node.Name == "SECONDARY_LOCALITY")
+                if (Regex.IsMatch(node.Name, "^[IOB]-SECONDARY_LOCALITY"))
                     addr.secondary_locality += node.InnerText + " ";
 
-                if (node.Name == "THOROFARE")
+                if (Regex.IsMatch(node.Name, "^[IOB]-THOROFARE"))
                     addr.thorofare += node.InnerText + " ";
 
-                if (node.Name == "BUILDING_GROUP_NAME")
+                if (Regex.IsMatch(node.Name, "^[IOB]-BUILDING_GROUP_NAME"))
                     addr.building_group_name += node.InnerText + " ";
 
-                if (node.Name == "BUILDING_NAME")
+                if (Regex.IsMatch(node.Name, "^[IOB]-BUILDING_NAME"))
                     addr.building_name += node.InnerText + " ";
 
-                if (node.Name == "SUB_BUILDING_NAME")
+                if (Regex.IsMatch(node.Name, "^[IOB]-SUB_BUILDING_NAME"))
                     addr.sub_building_name += node.InnerText + " ";
 
-                if (node.Name == "BUILDING_NUMBER")
+                if (Regex.IsMatch(node.Name, "^[IOB]-BUILDING_NUMBER"))
                     addr.building_number += node.InnerText + " ";
 
-                if (node.Name == "DEPARTMENT")
+                if (Regex.IsMatch(node.Name, "^[IOB]-DEPARTMENT"))
                     addr.department += node.InnerText + " ";
 
-                if (node.Name == "ORGANISATION_NAME")
+                if (Regex.IsMatch(node.Name, "^[IOB]-ORGANISATION_NAME"))
                     addr.organisation_name += node.InnerText + " ";
+
+                if (node.Name == "NUMBER")
+                    numbers += node.InnerText + " ";
             }
 
-            string response = addr.organisation_name + addr.department + addr.building_number +
-                    addr.sub_building_name + addr.building_name + addr.building_group_name +
-                    addr.thorofare + addr.secondary_locality + addr.locality;
+            addr.numbers = numbers.Split(new string[] { " " }, StringSplitOptions.RemoveEmptyEntries);
 
             addr.locality = addr.locality.Trim();
             addr.secondary_locality = addr.secondary_locality.Trim();
@@ -1119,8 +1013,37 @@ namespace post
             addr.building_number = addr.building_number.Trim();
             addr.department = addr.department.Trim();
             addr.organisation_name = addr.organisation_name.Trim();
+        }
 
-            return response;
+        Dictionary<string[], string[]> addIOB(ref Dictionary<string, string[]> tokens)
+        {
+            Dictionary<string[], string[]> tagged_tokens = new Dictionary<string[], string[]>();
+
+            foreach(KeyValuePair<string, string[]> token in tokens)
+            {
+                List<string> tagged_token = new List<string>();
+
+                if (token.Value.Length == 0)
+                    continue;
+                else if (token.Value.Length == 1)
+                {
+                    tagged_token.Add("O-" + token.Key);
+                }
+                else
+                {
+                    for (int i = 0; i < token.Value.Length; i++)
+                    {
+                        if (i == 0)
+                            tagged_token.Add("B-" + token.Key);
+                        else
+                            tagged_token.Add("I-" + token.Key);
+                    }
+                }
+
+                tagged_tokens.Add(tagged_token.ToArray(), tokens[token.Key]);
+            }
+
+            return tagged_tokens;
         }
 
         string findCounty(int county)
