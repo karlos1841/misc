@@ -1,0 +1,221 @@
+#!/opt/alert/bin/python
+
+import elastalert.elastalert
+import inspect
+import ast
+import astunparse
+import os
+import sys
+import pkg_resources
+
+class Recovery:
+    def __init__(self, rule):
+        self.recovery_allow_null_hits = True
+        if 'recovery_allow_null_hits' in rule and rule['recovery_allow_null_hits'] == False:
+            self.recovery_allow_null_hits = False
+        self.are_hits_null = True
+        self.recovery_command = rule['recovery_command']
+        self.fields_to_replace = re.findall("%{(.*?)}", self.recovery_command)
+        self.doc = {}
+        self.is_match = False
+        self.no_match_flag = False
+        self.class_name = ""  # Difference, FindMatch, etc.
+
+    def run_cmd(self, CMD):
+        proc = subprocess.Popen(CMD, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+        stdout, stderr = proc.communicate()
+        if proc.returncode != 0:
+            output = [proc.returncode, stderr]
+            return output
+        output = [0, stdout]
+        return output
+
+    def save_match(self, doc):
+        #elastalert_logger.info('%s' % str(doc))
+        self.is_match = True
+        self.doc = doc
+
+    def update_hits(self, count):
+        if count != 0:
+            self.are_hits_null = False
+        else:
+            self.are_hits_null = True
+
+    def invoke(self):
+        if self.is_match == True:
+            self.is_match = False
+            self.no_match_flag = False
+            return False
+
+        if self.no_match_flag == True:
+            return False
+
+        if self.recovery_allow_null_hits == False and self.are_hits_null == True:
+            return False
+
+        self.no_match_flag = True
+        command = self.recovery_command
+        for field in self.fields_to_replace:
+            try:
+                doc_value = self.doc
+                f = field.split('.')
+                if f[-1] == "keyword":
+                    f[-2] = f[-2] + ".keyword"
+                    del f[-1]
+                for x in f:
+                    doc_value = doc_value[x]
+                command = command.replace("%{" + field + "}", str(doc_value))
+            except KeyError:
+                pass
+
+        elastalert_logger.info('%s' % self.run_cmd(command)[1])
+        return True
+
+
+def process_recovery(self, rule, endtime):
+    if 'recovery' in rule and rule['recovery'] == True:
+        alert_index = rule['writeback_index']
+        # workaround for now, surely will break in future versions
+        if 'query_key' not in rule:
+            qk = '_type'
+        else:
+            qk = rule['query_key']
+
+        rule['doc_type'] = '_doc'
+        rn = rule['name']
+        match_docs = rule['type'].matches
+        rule_obj = rule['type']
+        rule_type_name = str(rule['type'].__class__.__name__)
+
+        run_every = str(rule['run_every']).split(':')
+        run_every_sec = int(run_every[-1]) + int(run_every[-2]) * 60
+        myStartTime = endtime - datetime.timedelta(seconds=run_every_sec+1)
+        myEndTime = endtime
+        elastalert_logger.info('Recovery: start_time %s, end_time %s' % (str(myStartTime), str(myEndTime)))
+        if 'es_username' in rule and 'es_password' in rule:
+            url = "http://{}:{}@{}:{}".format(rule['es_username'], rule['es_password'], rule['es_host'], rule['es_port'])
+        else:
+            url = "http://{}:{}".format(rule['es_host'], rule['es_port'])
+        es = Elasticsearch([url])
+
+
+        diff_freeze = []
+        if rule_type_name == "Difference":
+            for k, v in rule_obj.qobj.items():
+                if v.avg_history == 0:
+                    diff_freeze.append(k)
+
+        # if there is a match
+        for doc in match_docs:
+            if doc[qk] not in self.recovery_obj:
+                self.recovery_obj[doc[qk]] = {rn: self.Recovery(rule)}
+            else:
+                if rn not in self.recovery_obj[doc[qk]]:
+                    self.recovery_obj[doc[qk]].update({rn: self.Recovery(rule)})
+
+            self.recovery_obj[doc[qk]][rn].class_name = rule_type_name
+            self.recovery_obj[doc[qk]][rn].save_match(doc)
+
+        hits_docs = self.get_hits_terms(rule, myStartTime, myEndTime, rule['index'], qk)
+        if hits_docs:
+            #print(str(hits_docs))
+            hits_docs = list(hits_docs.items())[0][1]
+            for doc in hits_docs:
+                # continue if hit doc is present in match doc
+                q_flag = False
+                for d in match_docs:
+                    if d[qk] == doc['key']:
+                        q_flag = True
+                        break
+
+                if q_flag == True:
+                    continue
+
+                # if there is no match for particular query_key
+                for k, v in self.recovery_obj.items():
+                    for k2, v2 in v.items():
+                         if v2.class_name == "Difference" and k in diff_freeze:
+                             continue
+                         if k == doc['key'] and k2 == rn:
+                             v2.update_hits(doc['doc_count'])
+
+        print(str(self.recovery_obj))
+        for k, v in list(self.recovery_obj.items()):
+            for k2, v2 in list(v.items()):
+                if v2.invoke() == True:
+                    del self.recovery_obj[k][k2]
+            if not self.recovery_obj[k]:
+                del self.recovery_obj[k]
+        print(str(self.recovery_obj))
+
+
+if __name__ == "__main__":
+
+    elastalert_path = os.path.dirname(inspect.getfile(elastalert))
+
+    if not os.path.exists(elastalert_path + "/recovery.py"):
+        source = inspect.getsource(elastalert.elastalert)
+        tree = ast.parse(source)
+
+        init_body = None
+        run_rule_body = None
+        for i in ast.walk(tree):
+            if isinstance(i, ast.FunctionDef) and i.name == "__init__":
+                init_body = i.body
+            elif isinstance(i, ast.FunctionDef) and i.name == "run_rule":
+                run_rule_body = i.body
+
+        # insert imports
+        import_node = ast.parse("from elasticsearch.client import Elasticsearch")
+        tree.body.insert(0, import_node)
+        import_node = ast.parse("import re")
+        tree.body.insert(0, import_node)
+        import_node = ast.parse("import subprocess")
+        tree.body.insert(0, import_node)
+
+        # insert self.recovery_obj = {} at the beginning of __init__
+        #assign_node = ast.Assign(targets=[ast.Name(id='self.recovery_obj', ctx=ast.Store())], value=ast.Dict(keys=[], values=[]))
+        assign_node = ast.parse("self.recovery_obj = {}")
+        init_body.insert(0, assign_node)
+
+        # insert process_recovery function definition
+        function_definition_node = ast.parse(inspect.getsource(process_recovery))
+        for i in ast.walk(tree):
+            if isinstance(i, ast.ClassDef) and i.name == "ElastAlerter":
+                i.body.insert(0, function_definition_node)
+                break
+
+        # insert function call before last while loop
+        function_call_node = ast.parse("self.process_recovery(rule, endtime)")
+        index = 0
+        while_index = index
+        for i in run_rule_body:
+            if isinstance(i, ast.While):
+                while_index = index
+            index += 1
+        run_rule_body.insert(while_index, function_call_node)
+
+        # insert class definition
+        class_definition_node = ast.parse(inspect.getsource(Recovery))
+        for i in ast.walk(tree):
+            if isinstance(i, ast.ClassDef) and i.name == "ElastAlerter":
+                i.body.insert(0, class_definition_node)
+                break
+
+        # dump new source code
+        ast.fix_missing_locations(tree)
+        with open(elastalert_path + "/recovery.py", 'w') as f:
+            f.write(astunparse.unparse(tree))
+
+
+    # create entry point for recovery bypassing elastalert.py
+    d = pkg_resources.Distribution()
+    ep = pkg_resources.EntryPoint.parse("recovery = elastalert.recovery:main", dist=d)
+    d._ep_map = {"console_scripts": {"recovery": ep}}
+    pkg_resources.working_set.add(d)
+
+    # load new entry point
+    sys.exit(
+        d.load_entry_point("console_scripts", "recovery")()
+    )
+
