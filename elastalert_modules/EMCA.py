@@ -8,6 +8,64 @@ from elastalert.util import total_seconds
 from elastalert.util import lookup_es_key
 from elastalert.util import EAException
 from elastalert.util import elasticsearch_client
+from staticconf.loader import yaml_loader
+
+class BlacklistNgRule(CompareRule):
+    required_options = frozenset(['compare_key', 'blacklist-ng'])
+
+    def __init__(self, rules, args=None):
+        super(BlacklistNgRule, self).__init__(rules, args=None)
+        self.compare_key = self.rules['compare_key']
+        self.split_results = False
+        if 'split_results' in self.rules and self.rules['split_results'] == True:
+            self.split_results = True
+        # do not silence matches
+        self.rules['realert'] = datetime.timedelta(minutes=0)
+        # changing the name is enough to get rid of query filter(ORs on blacklist file)
+        self.expand_entries('blacklist-ng')
+
+    def expand_entries(self, list_type):
+        """ Expand entries specified in files using the '!file' directive, if there are
+        any, then add everything to a set.
+        EDIT: added yaml parsing using the '!yaml' directive
+        """
+        entries_set = set()
+        for entry in self.rules[list_type]:
+            if entry.startswith("!file"):  # - "!file /path/to/list"
+                filename = entry.split()[1]
+                with open(filename, 'r') as f:
+                    for line in f:
+                        entries_set.add(line.rstrip())
+            elif entry.startswith("!yaml"):
+                filename = entry.split()[1]
+                entries_dict = yaml_loader(filename)
+                # convert keys to set
+                entries_set = set(entries_dict)
+            else:
+                entries_set.add(entry)
+        self.rules[list_type] = entries_set
+
+    def add_data(self, data):
+        entries = set()
+        for d in data:
+            try:
+                entries.add(d[self.compare_key])
+            except KeyError:
+                pass
+
+        result = entries & self.rules['blacklist-ng']
+        if result != set():
+            elastalert_logger.info("Alert triggered, final result: %s" % result)
+
+            if self.split_results:
+                for r in result:
+                    extra = {self.compare_key: r}
+                    self.add_match(extra)
+            else:
+                extra = {self.compare_key: list(result)}
+                self.add_match(extra)
+
+
 
 class ConsecutiveGrowthRule(CompareRule):
     required_options = frozenset(['query_key', 'compare_key'])
